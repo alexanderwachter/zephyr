@@ -241,7 +241,7 @@ int can_calc_timing_data(const struct device *dev, struct can_timing *res,
 			 uint32_t bitrate, uint16_t sample_pnt)
 {
 	const uint32_t core_clock = can_get_core_clock(dev);
-	const struct can_driver_api *api = dev->driver_api;
+	const struct can_driver_api *api = dev->api;
 
 	return can_calc_timing_int(core_clock, res, &api->timing_min_data,
 				   &api->timing_max_data, bitrate, sample_pnt);
