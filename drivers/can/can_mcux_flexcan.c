@@ -170,6 +170,29 @@ static int mcux_flexcan_set_mode(const struct device *dev, enum can_mode mode)
 		return -EIO;
 	}
 
+	data->timing.preDivider = timing->prescaler;
+	data->timing.rJumpwidth = timing->sjw;
+	data->timing.phaseSeg1 = timing->phase_seg1;
+	data->timing.phaseSeg2 = timing->phase_seg2;
+	data->timing.propSeg = timing->prop_seg;
+
+	FLEXCAN_SetTimingConfig(config->base, &data->timing);
+
+	return 0;
+}
+
+static int mcux_flexcan_set_mode(const struct device *dev, enum can_mode mode)
+{
+	struct mcux_flexcan_data *data = dev->data;
+	const struct mcux_flexcan_config *config = dev->config;
+	flexcan_config_t flexcan_config;
+	uint32_t clock_freq;
+
+	clock_freq = mcux_flexcan_get_core_clock(dev);
+	if (clock_freq == 0) {
+		return -EIO;
+	}
+
 	FLEXCAN_GetDefaultConfig(&flexcan_config);
 	flexcan_config.maxMbNum = FSL_FEATURE_FLEXCAN_HAS_MESSAGE_BUFFER_MAX_NUMBERn(0);
 	flexcan_config.clkSrc = config->clk_source;
@@ -683,6 +706,7 @@ static int mcux_flexcan_init(const struct device *dev)
 {
 	const struct mcux_flexcan_config *config = dev->config;
 	struct mcux_flexcan_data *data = dev->data;
+	struct can_timing timing;
 	int err;
 	int i;
 

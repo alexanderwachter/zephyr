@@ -114,7 +114,7 @@ enum can_mode {
 	/*Controller is in loopback mode (receive own messages)*/
 	CAN_LOOPBACK_MODE,
 	/*Combination of loopback and silent*/
-	CAN_SILENT_LOOPBACK_MODE
+	CAN_SILENT_LOOPBACK_MODE,
 };
 
 /**
