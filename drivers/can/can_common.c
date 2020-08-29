@@ -7,6 +7,7 @@
 #include <drivers/can.h>
 #include <kernel.h>
 #include <sys/util.h>
+#include "can_common.h"
 
 #define LOG_LEVEL CONFIG_CAN_LOG_LEVEL
 #include <logging/log.h>
@@ -143,6 +144,208 @@ int can_attach_workq(const struct device *dev, struct k_work_q *work_q,
 	return api->attach_isr(dev, can_work_isr_put, work, filter);
 }
 
+static struct can_send_ctx *can_get_next_tx_to(struct can_tx_driver_ctx *ctx)
+{
+	sys_snode_t *node = sys_slist_peek_head(&ctx->send_list);
+	struct can_send_ctx *send_ctx;
+	struct can_send_ctx *next_to = CONTAINER_OF(node, struct can_send_ctx, node);
+	node = sys_slist_peek_next(node);
+
+	if (!node) {
+		return next_to;
+	}
+
+	SYS_SLIST_ITERATE_FROM_NODE(&ctx->send_list, node) {
+		send_ctx = CONTAINER_OF(node, struct can_send_ctx, node);
+		if (next_to->timeout.ticks < send_ctx->timeout.ticks) {
+			next_to = send_ctx;
+		}
+	}
+
+	return next_to;
+}
+
+static void can_tx_timeout_handle(struct can_tx_driver_ctx *ctx,
+				  struct can_send_ctx *send_ctx)
+{
+	sys_slist_find_and_remove(&ctx->send_list, &send_ctx->node);
+	send_ctx->cb(NULL /*TODO get dev*/, send_ctx->user_data, CAN_TX_TIMEOUT);
+}
+
+static void can_tx_timeout(struct _timeout *to)
+{
+	struct can_tx_driver_ctx *ctx =
+		CONTAINER_OF(to, struct can_tx_driver_ctx, to);
+	struct can_send_ctx *next_to;
+	struct  z_spinlock_key key;
+	k_timeout_t next_timeout;
+
+	can_tx_timeout_handle(ctx, ctx->next_to);
+
+	key = k_spin_lock(&ctx->lock);
+
+	while (!sys_slist_is_empty(&ctx->send_list)) {
+		next_to = can_get_next_tx_to(ctx);
+		k_spin_unlock(&ctx->lock, key);
+		if (next_to->timeout.ticks <= k_uptime_ticks()) {
+			can_tx_timeout_handle(ctx, next_to);
+			key = k_spin_lock(&ctx->lock);
+			continue;
+		}
+
+		next_timeout.ticks = next_to->timeout.ticks - k_uptime_ticks();
+		z_add_timeout(&ctx->to, can_tx_timeout, next_timeout);
+		break;
+	}
+}
+
+static int can_abort_tx(struct can_tx_driver_ctx *ctx,
+			struct can_send_ctx *send_ctx)
+{
+	k_timeout_t rem_ticks;
+	struct z_spinlock_key key;
+
+	key = k_spin_lock(&ctx->lock);
+
+	if (send_ctx == ctx->next_to) {
+		ctx->next_to = can_get_next_tx_to(ctx);
+		rem_ticks.ticks =  ctx->next_to->timeout.ticks - k_uptime_ticks();
+		z_abort_timeout(&ctx->to);
+		z_add_timeout(&ctx->to, can_tx_timeout, rem_ticks);
+	}
+
+	sys_slist_find_and_remove(&ctx->send_list, &send_ctx->node);
+
+	k_spin_unlock(&ctx->lock, key);
+
+	send_ctx->cb(NULL /*dev*/, send_ctx->user_data, CAN_TX_ABORT);
+
+	return CAN_TX_OK;
+}
+
+bool can_frame_prio_higher(const struct zcan_frame *frame1,
+			   const struct zcan_frame *frame2)
+{
+	if (frame1->id_type == frame2->id_type) {
+		return frame1->id > frame2->id;
+	}
+
+	/* standard ID has higher prio than extended ID */
+	if (frame1->id_type == CAN_STANDARD_IDENTIFIER) {
+		return true;
+	}
+
+	return false;
+}
+
+static inline void can_insert_tx_ctx(struct can_tx_driver_ctx *ctx,
+				     struct can_send_ctx *send_ctx)
+{
+	sys_snode_t *prev_node = sys_slist_peek_head(&ctx->send_list);
+	sys_snode_t *node = sys_slist_peek_next(prev_node);
+	struct can_send_ctx *send_ctx_next;
+	const struct zcan_frame *frame = send_ctx->frame;
+
+	if (prev_node == NULL ||
+	    can_frame_prio_higher(frame,
+				  CONTAINER_OF(prev_node, struct can_send_ctx, node)->frame)) {
+		sys_slist_append(&ctx->send_list, &send_ctx->node);
+	}
+
+	if (node == NULL) {
+		sys_slist_prepend(&ctx->send_list, &send_ctx->node);
+		return;
+	}
+
+	SYS_SLIST_ITERATE_FROM_NODE(&ctx->send_list, node) {
+		send_ctx_next = CONTAINER_OF(node, struct can_send_ctx, node);
+		if (can_frame_prio_higher(frame, send_ctx_next->frame)) {
+			sys_slist_insert(&ctx->send_list, prev_node,
+					 &send_ctx->node);
+			return;
+		}
+	}
+
+	sys_slist_prepend(&ctx->send_list, &send_ctx->node);
+}
+
+int can_queue_tx(struct can_tx_driver_ctx *ctx, struct can_send_ctx *send_ctx)
+{
+	k_timeout_t rem_ticks;
+	struct z_spinlock_key key;
+
+	if (k_uptime_ticks() >= send_ctx->timeout.ticks) {
+		return CAN_TX_TIMEOUT;
+	}
+
+	rem_ticks.ticks = send_ctx->timeout.ticks - k_uptime_ticks();
+
+	key = k_spin_lock(&ctx->lock);
+	can_insert_tx_ctx(ctx, send_ctx);
+
+	if (rem_ticks.ticks < z_timeout_remaining(&ctx->to)) {
+		z_abort_timeout(&ctx->to);
+		z_add_timeout(&ctx->to, can_tx_timeout, rem_ticks);
+		ctx->next_to = send_ctx;
+	}
+
+	k_spin_unlock(&ctx->lock, key);
+
+	return CAN_TX_OK;
+}
+
+int can_send_async(const struct device *dev, k_timeout_t frame_timeout,
+			  struct can_send_ctx *send_ctx)
+{
+	const struct can_driver_api *api =
+		(const struct can_driver_api *)dev->api;
+	struct can_tx_driver_ctx *ctx = (struct can_tx_driver_ctx *) dev->data;
+	int ret;
+
+	if (!send_ctx->cb || !send_ctx->frame || !send_ctx->frames_cnt) {
+		LOG_ERR("Invalid send_ctx");
+		return CAN_TX_EINVAL;
+	}
+
+	send_ctx->timeout.ticks = frame_timeout.ticks + k_uptime_ticks();
+
+	ret = api->send(dev, send_ctx);
+	if (ret == CAN_TX_BUSY) {
+		ret = can_queue_tx(ctx, send_ctx);
+	}
+
+	return ret;
+}
+
+struct can_cb_data {
+	struct k_sem sem;
+	int res;
+};
+
+static void can_send_cb(const struct device *dev, void * user_data, int res)
+{
+	struct can_cb_data *data = (struct can_cb_data *)user_data;
+	data->res = res;
+	k_sem_give(&data->sem);
+}
+
+int z_impl_can_send(const struct device *dev, const struct zcan_frame *frame,
+		    k_timeout_t frame_timeout)
+{
+	struct can_cb_data data;
+	struct can_send_ctx ctx;
+	int res;
+
+	k_sem_init(&data.sem, 0, 1);
+	can_send_ctx_init(&ctx, frame, 1, can_send_cb, &data);
+	res = can_send_async(dev, frame_timeout, &ctx);
+	if (res != CAN_TX_OK) {
+		return res;
+	}
+
+	k_sem_take(&data.sem, K_FOREVER);
+	return data.res;
+}
 
 static int update_sampling_pnt(uint32_t ts, uint32_t sp, struct can_timing *res,
 			       const struct can_timing *max,

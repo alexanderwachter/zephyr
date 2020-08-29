@@ -9,6 +9,7 @@
 #define ZEPHYR_DRIVERS_CAN_STM32_CAN_H_
 
 #include <drivers/can.h>
+#include "can_common.h"
 
 #define DEV_DATA(dev) ((struct can_stm32_data *const)(dev)->data)
 #define DEV_CFG(dev) \
@@ -40,12 +41,8 @@
 #define CAN_IN_32BIT_MASK_MODE(can, bank) (!CAN_BANK_IN_LIST_MODE(can, bank) &&	\
 					   CAN_BANK_IN_32BIT_MODE(can, bank))
 struct can_mailbox {
-	can_tx_callback_t tx_callback;
-	void *callback_arg;
-	struct k_sem tx_int_sem;
-	uint32_t error_flags;
+	struct can_send_ctx *ctx;
 };
-
 
 /* number = FSCx | FMBx */
 enum can_filter_type {
@@ -56,6 +53,8 @@ enum can_filter_type {
 };
 
 struct can_stm32_data {
+	/* Has to be at the beginning !*/
+	struct can_tx_driver_ctx common_ctx;
 	struct k_mutex inst_mutex;
 	struct k_sem tx_int_sem;
 	struct can_mailbox mb0;
@@ -65,6 +64,7 @@ struct can_stm32_data {
 	can_rx_callback_t rx_cb[CONFIG_CAN_MAX_FILTER];
 	void *cb_arg[CONFIG_CAN_MAX_FILTER];
 	can_state_change_isr_t state_change_isr;
+	struct can_tx_driver_ctx tx_ctx;
 };
 
 struct can_stm32_config {
