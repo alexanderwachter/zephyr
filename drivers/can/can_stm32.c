@@ -53,14 +53,7 @@ LOG_MODULE_DECLARE(can_driver, CONFIG_CAN_LOG_LEVEL);
 static const uint8_t filter_in_bank[] = {2, 4, 1, 2};
 static const uint8_t reg_demand[] = {2, 1, 4, 2};
 
-static void can_stm32_signal_tx_complete(struct can_mailbox *mb)
-{
-	if (mb->tx_callback) {
-		mb->tx_callback(mb->error_flags, mb->callback_arg);
-	} else  {
-		k_sem_give(&mb->tx_int_sem);
-	}
-}
+int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx);
 
 static void can_stm32_get_msg_fifo(CAN_FIFOMailBox_TypeDef *mbox,
 				    struct zcan_frame *msg)
@@ -144,50 +137,57 @@ static inline void can_stm32_bus_state_change_isr(CAN_TypeDef *can,
 }
 
 static inline
-void can_stm32_tx_isr_handler(CAN_TypeDef *can, struct can_stm32_data *data)
+void can_stm32_tx_isr_handler(const struct device *dev,
+			      struct can_stm32_data *data)
 {
+	const struct can_stm32_config *cfg = DEV_CFG(dev);
+	CAN_TypeDef *can = cfg->can;
 	uint32_t bus_off;
+	sys_snode_t *node;
+	struct can_send_ctx *next_ctx;
+	int res;
 
 	bus_off = can->ESR & CAN_ESR_BOFF;
 
 	if ((can->TSR & CAN_TSR_RQCP0) | bus_off) {
-		data->mb0.error_flags =
-				can->TSR & CAN_TSR_TXOK0 ? CAN_TX_OK  :
-				can->TSR & CAN_TSR_TERR0 ? CAN_TX_ERR :
-				can->TSR & CAN_TSR_ALST0 ? CAN_TX_ARB_LOST :
-						 bus_off ? CAN_TX_BUS_OFF :
-							   CAN_TX_UNKNOWN;
+		res = can->TSR & CAN_TSR_TXOK0 ? CAN_TX_OK  :
+		      can->TSR & CAN_TSR_TERR0 ? CAN_TX_ERR :
+		      can->TSR & CAN_TSR_ALST0 ? CAN_TX_ARB_LOST :
+		      bus_off                  ? CAN_TX_BUS_OFF :
+						 CAN_TX_UNKNOWN;
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP0;
-		can_stm32_signal_tx_complete(&data->mb0);
+		data->mb0.ctx->cb(dev, data->mb0.ctx->user_data, res);
 	}
 
 	if ((can->TSR & CAN_TSR_RQCP1) | bus_off) {
-		data->mb1.error_flags =
-				can->TSR & CAN_TSR_TXOK1 ? CAN_TX_OK  :
-				can->TSR & CAN_TSR_TERR1 ? CAN_TX_ERR :
-				can->TSR & CAN_TSR_ALST1 ? CAN_TX_ARB_LOST :
-				bus_off                  ? CAN_TX_BUS_OFF :
-							   CAN_TX_UNKNOWN;
+		res = can->TSR & CAN_TSR_TXOK1 ? CAN_TX_OK  :
+		      can->TSR & CAN_TSR_TERR1 ? CAN_TX_ERR :
+		      can->TSR & CAN_TSR_ALST1 ? CAN_TX_ARB_LOST :
+		      bus_off                  ? CAN_TX_BUS_OFF :
+						 CAN_TX_UNKNOWN;
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP1;
-		can_stm32_signal_tx_complete(&data->mb1);
+		data->mb1.ctx->cb(dev, data->mb1.ctx->user_data, res);
 	}
 
 	if ((can->TSR & CAN_TSR_RQCP2) | bus_off) {
-		data->mb2.error_flags =
-				can->TSR & CAN_TSR_TXOK2 ? CAN_TX_OK  :
-				can->TSR & CAN_TSR_TERR2 ? CAN_TX_ERR :
-				can->TSR & CAN_TSR_ALST2 ? CAN_TX_ARB_LOST :
-				bus_off                  ? CAN_TX_BUS_OFF :
-							   CAN_TX_UNKNOWN;
+		res = can->TSR & CAN_TSR_TXOK2 ? CAN_TX_OK  :
+		      can->TSR & CAN_TSR_TERR2 ? CAN_TX_ERR :
+		      can->TSR & CAN_TSR_ALST2 ? CAN_TX_ARB_LOST :
+		      bus_off                  ? CAN_TX_BUS_OFF :
+						 CAN_TX_UNKNOWN;
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP2;
-		can_stm32_signal_tx_complete(&data->mb2);
+		data->mb2.ctx->cb(dev, data->mb2.ctx->user_data, res);
 	}
 
 	if (can->TSR & CAN_TSR_TME) {
-		k_sem_give(&data->tx_int_sem);
+		node = sys_slist_get(&data->common_ctx.send_list);
+		if (node) {
+			next_ctx = CONTAINER_OF(node, struct can_send_ctx, node);
+			can_stm32_send(dev, next_ctx);
+		}
 	}
 }
 
@@ -203,7 +203,7 @@ static void can_stm32_isr(const struct device *dev)
 	cfg = DEV_CFG(dev);
 	can = cfg->can;
 
-	can_stm32_tx_isr_handler(can, data);
+	can_stm32_tx_isr_handler(dev, data);
 	can_stm32_rx_isr_handler(can, data);
 	if (can->MSR & CAN_MSR_ERRI) {
 		can_stm32_bus_state_change_isr(can, data);
@@ -236,7 +236,7 @@ static void can_stm32_tx_isr(const struct device *dev)
 	cfg = DEV_CFG(dev);
 	can = cfg->can;
 
-	can_stm32_tx_isr_handler(can, data);
+	can_stm32_tx_isr_handler(dev, data);
 }
 
 static void can_stm32_state_change_isr(const struct device *dev)
@@ -252,7 +252,7 @@ static void can_stm32_state_change_isr(const struct device *dev)
 
 	/*Signal bus-off to waiting tx*/
 	if (can->MSR & CAN_MSR_ERRI) {
-		can_stm32_tx_isr_handler(can, data);
+		can_stm32_tx_isr_handler(dev, data);
 		can_stm32_bus_state_change_isr(can, data);
 		can->MSR |= CAN_MSR_ERRI;
 	}
@@ -424,13 +424,6 @@ static int can_stm32_init(const struct device *dev)
 	int ret;
 
 	k_mutex_init(&data->inst_mutex);
-	k_sem_init(&data->tx_int_sem, 0, 1);
-	k_sem_init(&data->mb0.tx_int_sem, 0, 1);
-	k_sem_init(&data->mb1.tx_int_sem, 0, 1);
-	k_sem_init(&data->mb2.tx_int_sem, 0, 1);
-	data->mb0.tx_callback = NULL;
-	data->mb1.tx_callback = NULL;
-	data->mb2.tx_callback = NULL;
 	data->state_change_isr = NULL;
 
 	data->filter_usage = (1ULL << CAN_MAX_NUMBER_OF_FILTERS) - 1ULL;
@@ -603,32 +596,17 @@ done:
 }
 #endif /* CONFIG_CAN_AUTO_BUS_OFF_RECOVERY */
 
-
-int can_stm32_send(const struct device *dev, const struct zcan_frame *msg,
-		   k_timeout_t timeout, can_tx_callback_t callback,
-		   void *callback_arg)
+int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
 {
 	const struct can_stm32_config *cfg = DEV_CFG(dev);
 	struct can_stm32_data *data = DEV_DATA(dev);
 	CAN_TypeDef *can = cfg->can;
-	uint32_t transmit_status_register = can->TSR;
 	CAN_TxMailBox_TypeDef *mailbox = NULL;
-	struct can_mailbox *mb = NULL;
+	const struct zcan_frame *frame = ctx->frame;
+	struct z_spinlock_key key;
 
-	LOG_DBG("Sending %d bytes on %s. "
-		    "Id: 0x%x, "
-		    "ID type: %s, "
-		    "Remote Frame: %s"
-		    , msg->dlc, dev->name
-		    , msg->id
-		    , msg->id_type == CAN_STANDARD_IDENTIFIER ?
-		    "standard" : "extended"
-		    , msg->rtr == CAN_DATAFRAME ? "no" : "yes");
-
-	__ASSERT(msg->dlc == 0U || msg->data != NULL, "Dataptr is null");
-
-	if (msg->dlc > CAN_MAX_DLC) {
-		LOG_ERR("DLC of %d exceeds maximum (%d)", msg->dlc, CAN_MAX_DLC);
+	if (frame->dlc > CAN_MAX_DLC) {
+		LOG_ERR("DLC of %d exceeds maximum (%d)", frame->dlc, CAN_MAX_DLC);
 		return CAN_TX_EINVAL;
 	}
 
@@ -636,65 +614,65 @@ int can_stm32_send(const struct device *dev, const struct zcan_frame *msg,
 		return CAN_TX_BUS_OFF;
 	}
 
-	k_mutex_lock(&data->inst_mutex, K_FOREVER);
-	while (!(transmit_status_register & CAN_TSR_TME)) {
-		k_mutex_unlock(&data->inst_mutex);
-		LOG_DBG("Transmit buffer full");
-		if (k_sem_take(&data->tx_int_sem, timeout)) {
-			return CAN_TIMEOUT;
-		}
+	key = k_spin_lock(&data->common_ctx.lock);
 
-		k_mutex_lock(&data->inst_mutex, K_FOREVER);
-		transmit_status_register = can->TSR;
+	if (!(can->TSR & CAN_TSR_TME)) {
+		k_spin_unlock(&data->common_ctx.lock, key);
+		return CAN_TX_BUSY;
 	}
 
-	if (transmit_status_register & CAN_TSR_TME0) {
+	if (can->TSR & CAN_TSR_TME0) {
 		LOG_DBG("Using mailbox 0");
 		mailbox = &can->sTxMailBox[0];
-		mb = &(data->mb0);
-	} else if (transmit_status_register & CAN_TSR_TME1) {
+		data->mb0.ctx = ctx;
+	} else if (can->TSR  & CAN_TSR_TME1) {
 		LOG_DBG("Using mailbox 1");
 		mailbox = &can->sTxMailBox[1];
-		mb = &data->mb1;
-	} else if (transmit_status_register & CAN_TSR_TME2) {
+		data->mb1.ctx = ctx;
+	} else if (can->TSR  & CAN_TSR_TME2) {
 		LOG_DBG("Using mailbox 2");
 		mailbox = &can->sTxMailBox[2];
-		mb = &data->mb2;
+		data->mb2.ctx = ctx;
+	} else {
+		k_spin_unlock(&data->common_ctx.lock, key);
+		return CAN_TX_UNKNOWN;
 	}
 
-	mb->tx_callback = callback;
-	mb->callback_arg = callback_arg;
-	k_sem_reset(&mb->tx_int_sem);
+	LOG_DBG("Sending %d bytes on %s. "
+		"Id: 0x%x, "
+		"ID type: %s, "
+		"Remote Frame: %s"
+		, frame->dlc, dev->name
+		, frame->id
+		, frame->id_type == CAN_STANDARD_IDENTIFIER ?
+		"standard" : "extended"
+		, frame->rtr == CAN_DATAFRAME ? "no" : "yes");
 
-	/* mailbix identifier register setup */
+	/* mailbox identifier register setup */
 	mailbox->TIR &= CAN_TI0R_TXRQ;
 
-	if (msg->id_type == CAN_STANDARD_IDENTIFIER) {
-		mailbox->TIR |= (msg->id << CAN_TI0R_STID_Pos);
+	if (frame->id_type == CAN_STANDARD_IDENTIFIER) {
+		mailbox->TIR |= (frame->id << CAN_TI0R_STID_Pos);
 	} else {
-		mailbox->TIR |= (msg->id << CAN_TI0R_EXID_Pos)
+		mailbox->TIR |= (frame->id << CAN_TI0R_EXID_Pos)
 				| CAN_TI0R_IDE;
 	}
 
-	if (msg->rtr == CAN_REMOTEREQUEST) {
+	if (frame->rtr == CAN_REMOTEREQUEST) {
 		mailbox->TIR |= CAN_TI1R_RTR;
 	}
 
 	mailbox->TDTR = (mailbox->TDTR & ~CAN_TDT1R_DLC) |
-			((msg->dlc & 0xF) << CAN_TDT1R_DLC_Pos);
+			((frame->dlc & 0xF) << CAN_TDT1R_DLC_Pos);
 
-	mailbox->TDLR = msg->data_32[0];
-	mailbox->TDHR = msg->data_32[1];
+	mailbox->TDLR = frame->data_32[0];
+	mailbox->TDHR = frame->data_32[1];
 
 	mailbox->TIR |= CAN_TI0R_TXRQ;
-	k_mutex_unlock(&data->inst_mutex);
 
-	if (callback == NULL) {
-		k_sem_take(&mb->tx_int_sem, K_FOREVER);
-		return mb->error_flags;
-	}
+	k_spin_unlock(&data->common_ctx.lock, key);
 
-	return 0;
+	return CAN_TX_OK;
 }
 
 static inline int can_stm32_check_free(void **arr, int start, int end)

@@ -37,13 +37,12 @@ struct can_bus_err_cnt current_err_cnt;
 
 CAN_DEFINE_MSGQ(counter_msgq, 2);
 
-void tx_irq_callback(uint32_t error_flags, void *arg)
+void tx_irq_callback(const struct device *dev, void *arg, int res)
 {
 	char *sender = (char *)arg;
 
-	if (error_flags) {
-		printk("Callback! error-code: %d\nSender: %s\n",
-		       error_flags, sender);
+	if (res) {
+		printk("Callback! error-code: %d\nSender: %s\n", res, sender);
 	}
 }
 
@@ -196,6 +195,7 @@ void main(void)
 	uint8_t toggle = 1;
 	uint16_t counter = 0;
 	k_tid_t rx_tid, get_state_tid;
+	struct can_send_ctx ctx;
 	int ret;
 
 	can_dev = device_get_binding(DT_CHOSEN_ZEPHYR_CAN_PRIMARY_LABEL);
@@ -258,21 +258,22 @@ void main(void)
 
 	can_register_state_change_isr(can_dev, state_change_isr);
 
+	can_send_ctx_init(&ctx, &change_led_frame, 1, tx_irq_callback,
+			  "LED change");
+
 	printk("Finished init.\n");
 
 	while (1) {
 		change_led_frame.data[0] = toggle++ & 0x01 ? SET_LED : RESET_LED;
 		/* This sending call is none blocking. */
-		can_send(can_dev, &change_led_frame, K_FOREVER,
-			 tx_irq_callback,
-			 "LED change");
+		can_send_async(can_dev, K_FOREVER, &ctx);
 		k_sleep(SLEEP_TIME);
 
 		UNALIGNED_PUT(sys_cpu_to_be16(counter),
 			      (uint16_t *)&counter_frame.data[0]);
 		counter++;
 		/* This sending call is blocking until the message is sent. */
-		can_send(can_dev, &counter_frame, K_MSEC(100), NULL, NULL);
+		can_send(can_dev, &counter_frame, K_MSEC(100));
 		k_sleep(SLEEP_TIME);
 	}
 }

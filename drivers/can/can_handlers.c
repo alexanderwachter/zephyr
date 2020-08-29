@@ -40,27 +40,17 @@ static inline uint32_t z_vrfy_can_get_core_clock(const struct device *dev)
 #include <syscalls/can_get_core_clock_mrsh.c>
 
 static inline int z_vrfy_can_send(const struct device *dev,
-				  const struct zcan_frame *msg,
-				  k_timeout_t timeout,
-				  can_tx_callback_t callback_isr,
-				  void *callback_arg)
+				  const struct zcan_frame *frame,
+				  k_timeout_t frame_timeout)
 {
 	Z_OOPS(Z_SYSCALL_DRIVER_CAN(dev, send));
 
-	Z_OOPS(Z_SYSCALL_MEMORY_READ((const struct zcan_frame *)msg,
+	Z_OOPS(Z_SYSCALL_MEMORY_READ((const struct zcan_frame *)frame,
 				      sizeof(struct zcan_frame)));
-	Z_OOPS(Z_SYSCALL_MEMORY_READ(((struct zcan_frame *)msg)->data,
-				     sizeof((struct zcan_frame *)msg)->data));
-	Z_OOPS(Z_SYSCALL_VERIFY_MSG(callback_isr == 0,
-				    "callbacks may not be set from user mode"));
 
 	Z_OOPS(Z_SYSCALL_MEMORY_READ((void *)callback_arg, sizeof(void *)));
 
-	return z_impl_can_send((const struct device *)dev,
-			       (const struct zcan_frame *)msg,
-			       (k_timeout_t)timeout,
-			       (can_tx_callback_t) callback_isr,
-			       (void *)callback_arg);
+	return z_impl_can_send(dev, frame, frame_timeout);
 }
 #include <syscalls/can_send_mrsh.c>
 

@@ -23,6 +23,8 @@
 #include <zephyr/types.h>
 #include <device.h>
 #include <string.h>
+#include <sys/slist.h>
+#include <sys_clock.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,7 +48,12 @@ extern "C" {
 #define CAN_TX_BUS_OFF  (-4)
 /** unexpected error */
 #define CAN_TX_UNKNOWN  (-5)
-
+/** Controller busy */
+#define CAN_TX_BUSY     (-6)
+/** Frame transmission timeout */
+#define CAN_TX_TIMEOUT  (-7)
+/** Frame transmission aborted by user */
+#define CAN_TX_ABORT    (-8)
 /** invalid parameter */
 #define CAN_TX_EINVAL   (-22)
 
@@ -284,10 +291,28 @@ struct can_timing {
  * @typedef can_tx_callback_t
  * @brief Define the application callback handler function signature
  *
- * @param error_flags status of the performed send operation
- * @param arg argument that was passed when the message was sent
+ * @param dev can device pointer from the device issuing this callback
+ * @param user_data user_data argument that was passed when the message was sent
+ * @param result status of the performed send operation
  */
-typedef void (*can_tx_callback_t)(uint32_t error_flags, void *arg);
+typedef void (*can_tx_callback_t)(const struct device *dev, void *user_data,
+				  int result);
+
+/**
+ * @brief can send context structure
+ *
+ * Context for sending a frame.
+ * This struct needs to be keeped in a valid memory region
+ * until the frame is sent.
+ */
+struct can_send_ctx {
+	sys_snode_t node;
+	can_tx_callback_t cb;
+	void *user_data;
+	const struct zcan_frame *frame;
+	size_t frames_cnt;
+	k_timeout_t timeout;
+};
 
 /**
  * @typedef can_rx_callback_t
@@ -315,10 +340,7 @@ typedef int (*can_set_timing_t)(const struct device *dev,
 
 typedef int (*can_set_mode_t)(const struct device *dev, enum can_mode mode);
 
-typedef int (*can_send_t)(const struct device *dev,
-			  const struct zcan_frame *msg,
-			  k_timeout_t timeout, can_tx_callback_t callback_isr,
-			  void *callback_arg);
+typedef int (*can_try_send_t)(const struct device *dev, struct can_send_ctx *ctx);
 
 
 typedef int (*can_attach_msgq_t)(const struct device *dev,
@@ -367,7 +389,7 @@ struct zcan_work {
 __subsystem struct can_driver_api {
 	can_set_mode_t set_mode;
 	can_set_timing_t set_timing;
-	can_send_t send;
+	can_try_send_t send;
 	can_attach_isr_t attach_isr;
 	can_detach_t detach;
 #ifndef CONFIG_CAN_AUTO_BUS_OFF_RECOVERY
@@ -395,32 +417,55 @@ __subsystem struct can_driver_api {
  * to the can bus. Use can_write() for simple write.
  * *
  * @param dev          Pointer to the device structure for the driver instance.
- * @param msg          Message to transfer.
- * @param timeout      Waiting for empty tx mailbox timeout or K_FOREVER.
- * @param callback_isr Is called when message was sent or a transmission error
- *                     occurred. If NULL, this function is blocking until
- *                     message is sent. This must be NULL if called from user
- *                     mode.
- * @param callback_arg This will be passed whenever the isr is called.
+ * @param frame         Frame to transfer.
+ * @param frame_timeout Frame timeout. Frame will not be sent after this timeout
  *
  * @retval 0 If successful.
  * @retval CAN_TX_* on failure.
  */
-__syscall int can_send(const struct device *dev, const struct zcan_frame *msg,
-		       k_timeout_t timeout, can_tx_callback_t callback_isr,
-		       void *callback_arg);
+__syscall int can_send(const struct device *dev, const struct zcan_frame *frame, k_timeout_t frame_timeout);
 
-static inline int z_impl_can_send(const struct device *dev,
-				  const struct zcan_frame *msg,
-				  k_timeout_t timeout,
-				  can_tx_callback_t callback_isr,
-				  void *callback_arg)
+/**
+ * @brief Initialize the can sen context
+ *
+ * This routine initializes the send context. It must be called on the context
+ * before calling can_send_async()
+ * *
+ * @param frame        Frame(s) to transfer.
+ * @param len          Number of frames.
+ * @param timeout      Timeout value for the frame(s).
+ *                     Frames will not be sent after this time.
+ * @param callback_isr Is called when message was sent or a transmission error
+ *                     occurred.
+ * @param user_data   Data that will be passed whenever the isr is called.
+ *
+ */
+static inline
+void can_send_ctx_init(struct can_send_ctx *ctx,
+		       const struct zcan_frame *frame, size_t len,
+		       can_tx_callback_t callback_isr, void *user_data)
 {
-	const struct can_driver_api *api =
-		(const struct can_driver_api *)dev->api;
-
-	return api->send(dev, msg, timeout, callback_isr, callback_arg);
+	ctx->cb = callback_isr;
+	ctx->user_data = user_data;
+	ctx->frame = frame;
+	ctx->frames_cnt = len;
 }
+
+/**
+ * @brief Perform data transfer to CAN bus.
+ *
+ * This routine provides a generic interface to perform data transfer
+ * to the can bus. Use can_write() for simple write.
+ * *
+ * @param dev           Pointer to the device structure for the driver instance.
+ * @param frame_timeout Timeout for the frame. When expired, the tranmission is canceled.
+ * @param ctx           Initialized context.
+ *
+ * @retval 0 If successful.
+ * @retval CAN_TX_* on failure.
+ */
+int can_send_async(const struct device *dev, k_timeout_t frame_timeout,
+		   struct can_send_ctx *ctx);
 
 /*
  * Derived can APIs -- all implemented in terms of can_send()
@@ -464,7 +509,7 @@ static inline int can_write(const struct device *dev, const uint8_t *data,
 	msg.rtr = rtr;
 	memcpy(msg.data, data, length);
 
-	return can_send(dev, &msg, timeout, NULL, NULL);
+	return can_send(dev, &msg, timeout);
 }
 
 /**
