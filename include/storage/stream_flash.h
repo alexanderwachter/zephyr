@@ -95,6 +95,21 @@ int stream_flash_init(struct stream_flash_ctx *ctx, const struct device *fdev,
 size_t stream_flash_bytes_written(struct stream_flash_ctx *ctx);
 
 /**
+ * @brief Returns the free buffer space
+ *
+ * Returns the number of bytes that are still left before the flash
+ * needs to be synced.
+ * This function could be used to decide if the call should be offloaded.
+ *
+ * @note api-tags: pre-kernel-ok isr-ok
+ *
+ * @param ctx context
+ *
+ * @return Number of bytes that the buffer can still handle
+ */
+size_t stream_flash_free_buf_space(struct stream_flash_ctx *ctx);
+
+/**
  * @brief  Process input buffers to be written to flash device in single blocks.
  * Will store remainder between calls.
  *

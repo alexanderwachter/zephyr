@@ -75,3 +75,5 @@ module-str = image manager
 source "subsys/logging/Kconfig.template.log_config"
 
 endif # IMG_MANAGER
+
+rsource "mass_storage/Kconfig"

@@ -1,0 +1,63 @@
+# Mass Storage Firmware update
+
+# Copyright (c) 2020 Leica Geosystems AG
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig MASS_DFU
+	bool "Mass Sorage Firmware Update"
+	select STREAM_FLASH
+	select USB
+	help
+	  Enable firmware update with mass storage device.
+	  The Device presents itself as a mass storage device and shows
+	  a simulated FAT FS. Files written to the root are directly written to
+	  the IMG slot 1.
+
+if MASS_DFU
+
+module = MASS_DFU
+module-str = masstorage dfu
+source "subsys/logging/Kconfig.template.log_config"
+
+config MASS_DFU_BULK_EP_MPS
+	int "Endpoint max packet size"
+	default 64
+	range 32 64
+	help
+	  Mass storage device class bulk endpoints size
+
+config MASS_DFU_BLOCK_SIZE
+	int "Block-Size of simulated disk"
+	default 512
+	help
+	  This parameter is exposed trough the SCSI commands
+
+config MASS_DFU_BYTES_PER_SECTOR
+	int "Bytes per sector"
+	default 512
+	help
+	  Defines the bytes per sector in the FAT12 partition
+
+config MASS_DFU_MAX_FILENAME
+	int "Maximum filename length"
+	default 15
+	range 8 255
+	help
+	  Defines the buffer-size for filenames.
+	  The size of the buffer is this value + one for termination.
+
+config MASS_DFU_DATE_DAY
+	int "Last access day for root directory"
+	default 1
+	range 1 31
+
+config MASS_DFU_DATE_MONTH
+	int "Last access day for root directory"
+	default 1
+	range 1 12
+
+config MASS_DFU_DATE_YEAR
+	int "Last access day for root directory"
+	default 2020
+	range 1980 2107
+endif

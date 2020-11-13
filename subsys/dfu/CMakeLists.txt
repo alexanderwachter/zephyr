@@ -2,3 +2,4 @@
 
 add_subdirectory(boot)
 add_subdirectory(img_util)
+add_subdirectory(mass_storage)
