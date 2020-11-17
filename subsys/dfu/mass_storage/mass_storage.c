@@ -1,7 +1,8 @@
-
+#include <init.h>
 #include <errno.h>
 #include <sys/byteorder.h>
-#include <storage/stream_flash.h>
+#include <dfu/flash_img.h>
+#include <dfu/mcuboot.h>
 #include <usb/class/usb_msc.h>
 #include <usb/usb_device.h>
 #include <usb/usb_common.h>
@@ -9,8 +10,9 @@
 #include <devicetree.h>
 #include <stdint.h>
 #include <string.h>
-
+#include <kernel.h>
 #include <logging/log.h>
+
 LOG_MODULE_REGISTER(usb_dfu_msc, CONFIG_MASS_DFU_LOG_LEVEL);
 
 /* max USB packet size */
@@ -26,6 +28,7 @@ LOG_MODULE_REGISTER(usb_dfu_msc, CONFIG_MASS_DFU_LOG_LEVEL);
 
 #define PARTITION_ADDR DT_REG_ADDR(DT_CHOSEN(zephyr_update_partition))
 #define PARTITION_SIZE DT_REG_SIZE(DT_CHOSEN(zephyr_update_partition))
+#define PARTITION_ID   DT_FIXED_PARTITION_ID(DT_CHOSEN(zephyr_update_partition))
 
 #define BLOCK_SIZE	CONFIG_MASS_DFU_BLOCK_SIZE
 #define BLOCK_COUNT     (PARTITION_SIZE / BLOCK_SIZE)
@@ -115,17 +118,43 @@ enum SM_Event {
 	SM_EV_RESET
 };
 
+//static int mass_dfu_write_thread(void *arg1, void *arg2, void *arg3);
+static void write_flash(struct k_work *work);
+static void set_swap(struct k_work *work);
+
+/*
+K_THREAD_DEFINE(mass_dfu_write, 512, mass_dfu_write_thread, NULL, NULL, NULL,
+		CONFIG_MASS_DFU_THREAD_PRIO, 0, 0);
+*/
 struct mass_dfu_data {
-	struct stream_flash_ctx ctx;
-	struct CSW csw;
-	struct k_work work;
 	uint32_t block_addr;
 	uint32_t offset;
 	uint32_t residual;
-	char filename[CONFIG_MASS_DFU_MAX_FILENAME + 1];
 	uint32_t file_size;
+	struct flash_img_context ctx;
+	struct CSW csw;
+	struct k_work write_work;
+	struct k_work swap_set_work;
 	uint8_t state;
+	uint8_t write_ep;
+	char filename[CONFIG_MASS_DFU_MAX_FILENAME + 1];
 };
+
+static struct mass_dfu_data data = {
+	.state = SM_RESET,
+	.csw = {.Signature = CSW_Signature},
+	.write_work = Z_WORK_INITIALIZER(write_flash),
+	.swap_set_work = Z_WORK_INITIALIZER(set_swap),
+};
+
+struct mass_dfu_config {
+	uint8_t lun;
+};
+
+static const struct mass_dfu_config cfg = {
+	.lun = 0,
+};
+
 
 struct read10_cmd {
 	uint8_t opcode;
@@ -236,19 +265,6 @@ struct mode_sense_pbd {
 struct mode_sense_data {
 	struct mode_sense6_hdr hdr;
 } __packed;
-
-static struct mass_dfu_data data = {
-	.state = SM_RESET,
-	.csw = {.Signature = CSW_Signature},
-};
-
-struct mass_dfu_config {
-	uint8_t lun;
-};
-
-static const struct mass_dfu_config cfg = {
-	.lun = 0,
-};
 
 struct fat12_BS {
 	uint8_t  BS_jmpBoot[3];
@@ -390,7 +406,7 @@ struct fat12_dir_padded {
 
 static const struct fat12_dir_padded root_dir = {
 	.dir = {
-		.DIR_Name = {'U', 'p', 'd', 'a', 't', 'e', ' ', ' ', ' ', ' ', ' '},
+		.DIR_Name = {'U', 'P', 'D', 'A', 'T', 'E', ' ', ' ', ' ', ' ', ' '},
 		.DIR_Attr = FAT_ATTR_VOLUME_ID,
 		.DIR_NTRes = 0x00,
 		.DIR_CrtTimeTenth = 0x00,
@@ -754,9 +770,15 @@ static bool cpy_name(char *dest, const uint16_t *src, size_t len)
 	return false;
 }
 
+static void set_swap(struct k_work *work)
+{
+	boot_request_upgrade(1);
+}
+
 __weak void got_file(const char *filename, size_t size)
 {
 	LOG_INF("Got file %s, size: %zu", log_strdup(filename), size);
+	k_work_submit(&data.swap_set_work);
 }
 
 static void parse_rootdir_writes(const struct fat12_dir *dir, uint32_t dir_nr)
@@ -839,8 +861,6 @@ static void parse_rootdir_writes(const struct fat12_dir *dir, uint32_t dir_nr)
 		if (name_len && (filename_ptr - name_len >= data.filename)) {
 			filename_ptr -= name_len;
 			cpy_name(filename_ptr, lfn->LDIR_Name3, name_len);
-		} else {
-			LOG_WRN("Filename too long");
 		}
 
 		name_len = name_field_len(lfn->LDIR_Name2,
@@ -848,8 +868,6 @@ static void parse_rootdir_writes(const struct fat12_dir *dir, uint32_t dir_nr)
 		if (name_len && (filename_ptr - name_len >= data.filename)) {
 			filename_ptr -= name_len;
 			cpy_name(filename_ptr, lfn->LDIR_Name2, name_len);
-		} else {
-			LOG_WRN("Filename too long");
 		}
 
 		name_len = name_field_len(lfn->LDIR_Name1,
@@ -857,8 +875,6 @@ static void parse_rootdir_writes(const struct fat12_dir *dir, uint32_t dir_nr)
 		if (name_len && (filename_ptr - name_len >= data.filename)) {
 			filename_ptr -= name_len;
 			cpy_name(filename_ptr, lfn->LDIR_Name1, name_len);
-		} else {
-			LOG_WRN("Filename too long");
 		}
 
 		rem_ln_enties--;
@@ -874,40 +890,32 @@ static void parse_rootdir_writes(const struct fat12_dir *dir, uint32_t dir_nr)
 	}
 }
 
-static void rootdir_writes(uint32_t lba, uint32_t offset,
-				const uint8_t *buf, uint32_t len)
+static int rootdir_writes(uint32_t lba, uint32_t offset, uint8_t ep)
 {
+	uint8_t buf[CONFIG_MASS_DFU_BULK_EP_MPS];
 	const struct fat12_dir *dir = (const struct fat12_dir *)buf;
 	uint32_t dir_entry_number =
 		(lba * FAT_BYTES_PER_SECTOR + offset) / sizeof(struct fat12_dir);
+	uint32_t len;
+	int ret;
+
+	ret = usb_dc_ep_read_wait(ep, buf, sizeof(buf), &len);
+	if (ret != 0) {	
+		LOG_ERR("Could not read EP out data [%d]", ret);
+		usb_ep_set_stall(ep);
+		return -EIO;
+	}
 
 	for (int dir_cnt = len / sizeof(struct fat12_dir);
 	     dir_cnt; --dir_cnt, ++dir, ++dir_entry_number) {
 		parse_rootdir_writes(dir, dir_entry_number);
 	}
+
+	return len;
 }
 
-static int address_write_dispatch(uint32_t lba, const uint8_t *buf, uint32_t len)
+static void confirm_write_len(uint32_t len)
 {
-	int ret = 0;
-
-	LOG_DBG("write lba %d, offs: %d, residual: %d", lba, data.offset, data.residual);
-	/* LOG_HEXDUMP_DBG(buf, len, ""); */
-
-	if (lba < FAT_START_LBA) {
-		/* Ignore writes to Boot Sector */
-		LOG_DBG("Host writes bootsector");
-	} else if (lba < FAT_END_LBA) {
-		/* Ignore writes to FAT */
-		LOG_DBG("Host writes FAT");
-	} else if (lba < ROOT_DIR_END_LBA) {
-		rootdir_writes((lba - ROOT_DIR_START_LBA), data.offset, buf, len);
-	} else if (lba < DATA_END_LBA) {
-		/* Write data to the flash */
-	} else {
-		LOG_DBG("Write lba %d, offs %d to NULL", lba, data.offset);
-	}
-
 	data.residual -= len;
 	data.offset += len;
 	if (data.offset >= BLOCK_SIZE) {
@@ -917,6 +925,111 @@ static int address_write_dispatch(uint32_t lba, const uint8_t *buf, uint32_t len
 
 	if (data.residual == 0) {
 		send_CSW(CSW_PASSED);
+	}
+}
+
+/*
+static int mass_dfu_write_thread(void *arg1, void *arg2, void *arg3)
+{
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+	uint8_t buf[CONFIG_MASS_DFU_BULK_EP_MPS];
+	uint32_t len;
+	int ret;
+
+	k_sem_init(&data.write_sem, 0, 2);
+	flash_img_init_id(&data.ctx, PARTITION_ID);
+
+	while(1) {
+		k_sem_take(&data.write_sem, K_FOREVER);
+
+		ret = usb_dc_ep_read_wait(data.write_ep, buf, sizeof(buf), &len);
+		if (ret != 0) {	
+			LOG_ERR("Could not read EP out data [%d]", ret);
+			usb_ep_set_stall(data.write_ep);
+			return -EIO;
+		}
+
+		confirm_write_len(len);
+
+		flash_img_buffered_write(&data.ctx, buf, len, data.residual == 0);
+
+		ret = usb_dc_ep_read_continue(data.write_ep);
+		if (ret != 0) {	
+			LOG_ERR("Could not continue EP out data [%d]", ret);
+			usb_ep_set_stall(data.write_ep);
+			return -EIO;
+		}
+	}
+}
+*/
+static void write_flash(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	uint8_t buf[CONFIG_MASS_DFU_BULK_EP_MPS];
+	uint32_t len;
+	int ret;
+
+	ret = usb_dc_ep_read_wait(data.write_ep, buf, sizeof(buf), &len);
+	if (ret != 0) {	
+		LOG_ERR("Could not read EP out data [%d]", ret);
+		usb_ep_set_stall(data.write_ep);
+		return;
+	}
+
+	confirm_write_len(len);
+
+	flash_img_buffered_write(&data.ctx, buf, len, data.residual == 0);
+
+	ret = usb_dc_ep_read_continue(data.write_ep);
+	if (ret != 0) {	
+		LOG_ERR("Could not continue EP out data [%d]", ret);
+		usb_ep_set_stall(data.write_ep);
+		return;
+	}
+}
+
+static int address_write_dispatch(uint32_t lba, uint8_t ep)
+{
+	int ret = 0;
+	int read_bytes = 0;
+	uint8_t buf[CONFIG_MASS_DFU_BULK_EP_MPS];
+
+	LOG_DBG("write lba %d, offs: %d, residual: %d", lba, data.offset, data.residual);
+	/* LOG_HEXDUMP_DBG(buf, len, ""); */
+
+	if (lba < FAT_START_LBA) {
+		/* Ignore writes to Boot Sector */
+		LOG_DBG("Host writes bootsector");
+		ret = usb_dc_ep_read_wait(ep, buf, sizeof(buf), &read_bytes);
+	} else if (lba < FAT_END_LBA) {
+		/* Ignore writes to FAT */
+		LOG_DBG("Host writes FAT");
+		ret = usb_dc_ep_read_wait(ep, buf, sizeof(buf), &read_bytes);
+	} else if (lba < ROOT_DIR_END_LBA) {
+		read_bytes = rootdir_writes((lba - ROOT_DIR_START_LBA),
+					    data.offset, ep);
+	} else if (lba < DATA_END_LBA) {
+		/* Write data to the flash */
+		data.write_ep = ep;
+		k_work_submit(&data.write_work);
+		//k_sem_give(&data.write_sem);
+		return 0;
+	} else {
+		LOG_DBG("Write lba %d, offs %d to NULL", lba, data.offset);
+		ret = usb_dc_ep_read_wait(ep, buf, sizeof(buf), &read_bytes);
+	}
+
+	ret = usb_dc_ep_read_continue(ep);
+	if (ret != 0) {	
+		LOG_ERR("Could not continue EP out data [%d]", ret);
+		usb_ep_set_stall(ep);
+		return -EIO;
+	}
+
+	if (read_bytes > 0) {
+		confirm_write_len(read_bytes);
 	}
 
 	return ret;
@@ -1024,47 +1137,51 @@ static void process_scsi(struct CBW *cbw)
 	}
 }
 
-static int decode_cbw(struct CBW *cbw)
+static int decode_cbw(uint8_t ep)
 {
-	if (cbw->Signature != CBW_Signature) {
+	int ret;
+	uint32_t read_bytes;
+	struct CBW cbw;
+
+	ret = usb_read(ep, (uint8_t *)&cbw, sizeof(cbw), &read_bytes);
+	if (ret != 0) {
+		LOG_ERR("Could not read EP out data [%d]", ret);
+		usb_ep_set_stall(ep);
+		return -EIO;
+	}
+
+	if (read_bytes != sizeof(struct CBW)) {
+		LOG_ERR("CBW size wrong. %d", read_bytes);
+		return -EINVAL;
+	}
+
+	if (cbw.Signature != CBW_Signature) {
 		LOG_ERR("CBW Signature Mismatch");
 		return -EINVAL;
 	}
 
-	data.csw.Tag = cbw->Tag;
-	data.residual = sys_le32_to_cpu(cbw->DataLength);
+	data.csw.Tag = cbw.Tag;
+	data.residual = sys_le32_to_cpu(cbw.DataLength);
 
-	if (cbw->LUN != cfg.lun) {
-		LOG_ERR("Wrong LUN %d", cbw->LUN);
+	if (cbw.LUN != cfg.lun) {
+		LOG_ERR("Wrong LUN %d", cbw.LUN);
 		return -EINVAL;
 	}
 
-	if ((cbw->CBLength < 1) || (cbw->CBLength > sizeof(cbw->CB))) {
-		LOG_WRN("cbw.CBLength %d", cbw->CBLength);;
+	if ((cbw.CBLength < 1) || (cbw.CBLength > sizeof(cbw.CB))) {
+		LOG_WRN("cbw.CBLength %d", cbw.CBLength);
 		return -EINVAL;
 	}
 
 	LOG_DBG("DBW decoded. length: %d", data.residual);
 
-	process_scsi(cbw);
+	process_scsi(&cbw);
 
 	return 0;
 }
 
 static int sm_process(enum SM_Event event, uint8_t ep)
 {
-	int ret;
-	uint32_t read_bytes;
-	uint8_t buf[CONFIG_MASS_DFU_BULK_EP_MPS];
-
-	if (event == SM_EV_OUT_EP) {
-		ret = usb_read(ep, buf, sizeof(buf), &read_bytes);
-		if (ret != 0) {
-			LOG_ERR("Could not read EP out data [%d]", ret);
-			usb_ep_set_stall(ep);
-			return -EIO;
-		}
-	}
 
 	if (event == SM_EV_RESET) {
 		data.state = SM_WAIT_CBW;
@@ -1075,23 +1192,16 @@ static int sm_process(enum SM_Event event, uint8_t ep)
 	case SM_WAIT_CBW:
 		if (event != SM_EV_OUT_EP) {
 			LOG_ERR("Expected CBW but didn't get data");
-			ret = -EINVAL;
 			break;
 		}
 
-		if (read_bytes != sizeof(struct CBW)) {
-			LOG_ERR("CBW size wrong. %d", read_bytes);
-			ret = -EINVAL;
-			break;
-		}
-
-		decode_cbw((struct CBW *) buf);
+		decode_cbw(ep);
 		break;
 	case SM_DATA_IN:
 		address_read_dispatch(data.block_addr);
 		break;
 	case SM_DATA_OUT:
-		address_write_dispatch(data.block_addr, buf, read_bytes);
+		address_write_dispatch(data.block_addr, ep);
 		break;
 	case SM_TRANSFER_CSW:
 		if (event != SM_EV_IN_EP) {
@@ -1194,3 +1304,12 @@ USBD_CFG_DATA_DEFINE(primary, msd) struct usb_cfg_data mass_storage_config = {
 	.num_endpoints = ARRAY_SIZE(mass_ep_data),
 	.endpoint = mass_ep_data
 };
+
+static int flash_init(const struct device *dev)
+{
+	ARG_UNUSED(dev);
+	flash_img_init_id(&data.ctx, PARTITION_ID);
+	return 0;
+}
+
+SYS_INIT(flash_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
