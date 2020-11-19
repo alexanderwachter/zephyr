@@ -85,6 +85,17 @@ struct zcan_frame test_ext_mask_msg = {
 	.data    = {1, 2, 3, 4, 5, 6, 7, 8}
 };
 
+const uint8_t ext_buf_data[] = {8, 7, 6, 5, 4, 3, 2, 1};
+
+struct zcan_frame test_ext_buf_msg = {
+	.id_type = CAN_STANDARD_IDENTIFIER,
+	.rtr     = CAN_DATAFRAME,
+	.id      = TEST_CAN_STD_ID,
+	.dlc     = 8,
+	.ext_buf = 1,
+	.buf    = ext_buf_data
+};
+
 const struct zcan_filter test_std_filter = {
 	.id_type = CAN_STANDARD_IDENTIFIER,
 	.rtr = CAN_DATAFRAME,
@@ -131,6 +142,8 @@ static inline void check_msg(struct zcan_frame *msg1, struct zcan_frame *msg2,
 			     uint32_t mask)
 {
 	int cmp_res;
+	const uint8_t *msg1_data = msg1->ext_buf ? msg1->buf : msg1->data;
+	const uint8_t *msg2_data = msg2->ext_buf ? msg2->buf : msg2->data;
 
 	zassert_equal(msg1->id_type, msg2->id_type,
 		      "ID type does not match");
@@ -144,7 +157,9 @@ static inline void check_msg(struct zcan_frame *msg1, struct zcan_frame *msg2,
 	zassert_equal(msg1->dlc, msg2->dlc,
 		      "DLC does not match");
 
-	cmp_res = memcmp(msg1->data, msg2->data, msg1->dlc);
+
+
+	cmp_res = memcmp(msg1_data, msg2_data, msg1->dlc);
 	zassert_equal(cmp_res, 0, "Received data differ");
 }
 
@@ -566,6 +581,29 @@ void test_send_receive_buffer(void)
 }
 
 /*
+ * Attach to a filter that should pass the message and send multiple frames.
+ * The frames are using an external buffer.
+ */
+void test_send_receive_ext_buffer(void)
+{
+	int ret, filter_id;
+	struct zcan_frame msg_buffer;
+
+	zassert_not_null(can_dev, "Device not not found");
+
+	filter_id = attach_msgq(can_dev, &test_std_filter);
+
+	send_test_msg(can_dev, &test_ext_buf_msg);
+
+	ret = k_msgq_get(&can_msgq, &msg_buffer, TEST_RECEIVE_TIMEOUT);
+	zassert_equal(ret, 0, "Receiving timeout");
+
+	check_msg(&msg_buffer, &test_ext_buf_msg, 0);
+
+	can_detach(can_dev, filter_id);
+}
+
+/*
  * Attach to a filter that should not pass the message and send a message
  * with a different id.
  * The massage should not be received.
@@ -620,6 +658,7 @@ void test_main(void)
 			 ztest_unit_test(test_send_receive_std_masked),
 			 ztest_unit_test(test_send_receive_ext_masked),
 			 ztest_unit_test(test_send_receive_buffer),
+			 ztest_unit_test(test_send_receive_ext_buffer),
 			 ztest_unit_test(test_send_receive_wrong_id),
 			 ztest_unit_test(test_send_invalid_dlc));
 	ztest_run_test_suite(can_driver);

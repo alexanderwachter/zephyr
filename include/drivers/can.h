@@ -185,8 +185,10 @@ struct zcan_frame {
 	 * the data phase. Only valid for CAN-FD
 	 */
 	uint8_t brs : 1;
+	/** If set, buf points to the data, else data hold the data */
+	uint8_t ext_buf : 1;
 	/** Reserved for future flags */
-	uint8_t res : 7;
+	uint8_t res : 6;
 #if defined(CONFIG_CAN_RX_TIMESTAMP)
 	/** Timer value of the CAN free-running timer.
 	 * The timer is incremented every bit time and captured at the start
@@ -204,6 +206,8 @@ struct zcan_frame {
 		/** frame data, if ext_buf is unset */
 		uint8_t data[CAN_MAX_DLEN];
 		uint32_t data_32[ceiling_fraction(CAN_MAX_DLEN, sizeof(uint32_t))];
+		/** pointer ot the frame data, if ext_buf is set */
+		const uint8_t *buf;
 	};
 };
 

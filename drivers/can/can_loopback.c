@@ -104,6 +104,11 @@ int can_loopback_send(const struct device *dev,
 	}
 
 	loopback_frame.frame = *frame;
+
+	if (frame->ext_buf) {
+		memcpy(loopback_frame.frame.data, frame->buf, sizeof(frame->data));
+	}
+
 	loopback_frame.cb = callback;
 	loopback_frame.cb_arg = callback_arg;
 	loopback_frame.tx_compl = &tx_sem;

@@ -75,6 +75,7 @@ static void can_stm32_get_msg_fifo(CAN_FIFOMailBox_TypeDef *mbox,
 
 	msg->rtr = mbox->RIR & CAN_RI0R_RTR ? CAN_REMOTEREQUEST : CAN_DATAFRAME;
 	msg->dlc = mbox->RDTR & (CAN_RDT0R_DLC >> CAN_RDT0R_DLC_Pos);
+	msg->ext_buf = 0;
 	msg->data_32[0] = mbox->RDLR;
 	msg->data_32[1] = mbox->RDHR;
 #ifdef CONFIG_CAN_RX_TIMESTAMP
@@ -683,8 +684,13 @@ int can_stm32_send(const struct device *dev, const struct zcan_frame *msg,
 	mailbox->TDTR = (mailbox->TDTR & ~CAN_TDT1R_DLC) |
 			((msg->dlc & 0xF) << CAN_TDT1R_DLC_Pos);
 
-	mailbox->TDLR = msg->data_32[0];
-	mailbox->TDHR = msg->data_32[1];
+	if (msg->ext_buf) {
+		mailbox->TDLR = UNALIGNED_GET((uint32_t *)msg->buf);
+		mailbox->TDHR = UNALIGNED_GET((uint32_t *)(msg->buf + sizeof(uint32_t)));
+	} else {
+		mailbox->TDLR = msg->data_32[0];
+		mailbox->TDHR = msg->data_32[1];
+	}
 
 	mailbox->TIR |= CAN_TI0R_TXRQ;
 	k_mutex_unlock(&data->inst_mutex);

@@ -212,8 +212,15 @@ static void mcux_flexcan_copy_zframe_to_frame(const struct zcan_frame *src,
 	}
 
 	dest->length = src->dlc;
-	dest->dataWord0 = sys_cpu_to_be32(src->data_32[0]);
-	dest->dataWord1 = sys_cpu_to_be32(src->data_32[1]);
+	if (src->ext_buf) {
+		dest->dataWord0 = sys_be32_to_cpu(
+			UNALIGNED_GET((uint32_t *)src->buf));
+		dest->dataWord1 = sys_be32_to_cpu(
+			UNALIGNED_GET((uint32_t *)(src->buf + sizeof(uint32_t))));
+	} else {
+		dest->dataWord0 = sys_be32_to_cpu(src->data_32[0]);
+		dest->dataWord1 = sys_be32_to_cpu(src->data_32[1]);
+	}
 }
 
 static void mcux_flexcan_copy_frame_to_zframe(const flexcan_frame_t *src,
@@ -236,6 +243,7 @@ static void mcux_flexcan_copy_frame_to_zframe(const flexcan_frame_t *src,
 	dest->dlc = src->length;
 	dest->data_32[0] = sys_be32_to_cpu(src->dataWord0);
 	dest->data_32[1] = sys_be32_to_cpu(src->dataWord1);
+	dest->ext_buf = 0;
 #ifdef CONFIG_CAN_RX_TIMESTAMP
 	dest->timestamp = src->timestamp;
 #endif /* CAN_RX_TIMESTAMP */
