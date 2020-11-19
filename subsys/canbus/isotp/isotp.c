@@ -133,7 +133,7 @@ static void receive_send_fc(struct isotp_recv_ctx *ctx, uint8_t fs)
 	struct zcan_frame frame = {
 		.id_type = ctx->tx_addr.id_type,
 		.rtr = CAN_DATAFRAME,
-		.ext_id = ctx->tx_addr.ext_id
+		.id = ctx->tx_addr.id
 	};
 	uint8_t *data = frame.data;
 	int ret;
@@ -532,9 +532,9 @@ static inline int attach_ff_filter(struct isotp_recv_ctx *ctx)
 	struct zcan_filter filter = {
 		.id_type = ctx->rx_addr.id_type,
 		.rtr = CAN_DATAFRAME,
-		.ext_id = ctx->rx_addr.ext_id,
+		.id = ctx->rx_addr.id,
 		.rtr_mask = 1,
-		.ext_id_mask = CAN_EXT_ID_MASK
+		.id_mask = CAN_EXT_ID_MASK
 	};
 
 	ctx->filter_id = can_attach_isr(ctx->can_dev, receive_can_rx_isr, ctx,
@@ -573,7 +573,7 @@ int isotp_bind(struct isotp_recv_ctx *ctx, const struct device *can_dev,
 	ctx->state = ISOTP_RX_STATE_WAIT_FF_SF;
 
 	LOG_DBG("Binding to addr: 0x%x. Responding on 0x%x",
-		ctx->rx_addr.ext_id, ctx->tx_addr.ext_id);
+		ctx->rx_addr.id, ctx->tx_addr.id);
 
 	ctx->buf = net_buf_alloc_fixed(&isotp_rx_sf_ff_pool, timeout);
 	if (!ctx->buf) {
@@ -834,7 +834,7 @@ static inline int send_sf(struct isotp_send_ctx *ctx)
 	struct zcan_frame frame = {
 		.id_type = ctx->tx_addr.id_type,
 		.rtr = CAN_DATAFRAME,
-		.ext_id = ctx->tx_addr.ext_id
+		.id = ctx->tx_addr.id
 	};
 	size_t len = get_ctx_data_length(ctx);
 	int index = 0;
@@ -866,7 +866,7 @@ static inline int send_ff(struct isotp_send_ctx *ctx)
 	struct zcan_frame frame = {
 		.id_type = ctx->tx_addr.id_type,
 		.rtr = CAN_DATAFRAME,
-		.ext_id = ctx->tx_addr.ext_id,
+		.id = ctx->tx_addr.id,
 		.dlc = ISOTP_CAN_DL
 	};
 	int index = 0;
@@ -908,7 +908,7 @@ static inline int send_cf(struct isotp_send_ctx *ctx)
 	struct zcan_frame frame = {
 		.id_type = ctx->tx_addr.id_type,
 		.rtr = CAN_DATAFRAME,
-		.ext_id = ctx->tx_addr.ext_id,
+		.id = ctx->tx_addr.id,
 	};
 	int index = 0;
 	int ret;
@@ -1081,9 +1081,9 @@ static inline int attach_fc_filter(struct isotp_send_ctx *ctx)
 	struct zcan_filter filter = {
 		.id_type = ctx->rx_addr.id_type,
 		.rtr = CAN_DATAFRAME,
-		.ext_id = ctx->rx_addr.ext_id,
+		.id = ctx->rx_addr.id,
 		.rtr_mask = 1,
-		.ext_id_mask = CAN_EXT_ID_MASK
+		.id_mask = CAN_EXT_ID_MASK
 	};
 
 	ctx->filter_id = can_attach_isr(ctx->can_dev, send_can_rx_isr, ctx,
@@ -1127,7 +1127,7 @@ static int send(struct isotp_send_ctx *ctx, const struct device *can_dev,
 
 	len = get_ctx_data_length(ctx);
 	LOG_DBG("Send %d bytes to addr 0x%x and listen on 0x%x", len,
-		ctx->tx_addr.ext_id, ctx->rx_addr.ext_id);
+		ctx->tx_addr.id, ctx->rx_addr.id);
 	if (len > ISOTP_CAN_DL - (tx_addr->use_ext_addr ? 2 : 1)) {
 		ret = attach_fc_filter(ctx);
 		if (ret) {

@@ -103,7 +103,7 @@ struct isotp_msg_id {
 	/** Message identifier*/
 	union {
 		uint32_t std_id  : 11;
-		uint32_t ext_id  : 29;
+		uint32_t id  : 29;
 	};
 	/** extended address */
 	uint8_t ext_addr;
