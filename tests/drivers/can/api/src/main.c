@@ -148,7 +148,7 @@ static inline void check_msg(struct zcan_frame *msg1, struct zcan_frame *msg2,
 	zassert_equal(cmp_res, 0, "Received data differ");
 }
 
-static void tx_std_isr(uint32_t error_flags, void *arg)
+static void tx_std_isr(const struct device *dev, void *arg, int res)
 {
 	struct zcan_frame *msg = (struct zcan_frame *)arg;
 
@@ -157,7 +157,7 @@ static void tx_std_isr(uint32_t error_flags, void *arg)
 	zassert_equal(msg->id, TEST_CAN_STD_ID, "Arg does not match");
 }
 
-static void tx_std_masked_isr(uint32_t error_flags, void *arg)
+static void tx_std_masked_isr(const struct device *dev, void *arg, int res)
 {
 	struct zcan_frame *msg = (struct zcan_frame *)arg;
 
@@ -166,7 +166,7 @@ static void tx_std_masked_isr(uint32_t error_flags, void *arg)
 	zassert_equal(msg->id, TEST_CAN_STD_MASK_ID, "Arg does not match");
 }
 
-static void tx_ext_isr(uint32_t error_flags, void *arg)
+static void tx_ext_isr(const struct device *dev, void *arg, int res)
 {
 	struct zcan_frame *msg = (struct zcan_frame *)arg;
 
@@ -175,7 +175,7 @@ static void tx_ext_isr(uint32_t error_flags, void *arg)
 	zassert_equal(msg->id, TEST_CAN_EXT_ID, "Arg does not match");
 }
 
-static void tx_ext_masked_isr(uint32_t error_flags, void *arg)
+static void tx_ext_masked_isr(const struct device *dev, void *arg, int res)
 {
 	struct zcan_frame *msg = (struct zcan_frame *)arg;
 
@@ -245,35 +245,7 @@ static void send_test_msg(const struct device *can_dev,
 {
 	int ret;
 
-	ret = can_send(can_dev, msg, TEST_SEND_TIMEOUT, NULL, NULL);
-	zassert_not_equal(ret, CAN_TX_ARB_LOST,
-			  "Arbitration though in loopback mode");
-	zassert_equal(ret, CAN_TX_OK, "Can't send a message. Err: %d", ret);
-}
-
-static void send_test_msg_nowait(const struct device *can_dev,
-				 struct zcan_frame *msg)
-{
-	int ret;
-
-	if (msg->id_type == CAN_STANDARD_IDENTIFIER) {
-		if (msg->id == TEST_CAN_STD_ID) {
-			ret = can_send(can_dev, msg, TEST_SEND_TIMEOUT,
-				       tx_std_isr, msg);
-		} else {
-			ret = can_send(can_dev, msg, TEST_SEND_TIMEOUT,
-				       tx_std_masked_isr, msg);
-		}
-	} else {
-		if (msg->id == TEST_CAN_EXT_ID) {
-			ret = can_send(can_dev, msg, TEST_SEND_TIMEOUT,
-				       tx_ext_isr, msg);
-		} else {
-			ret = can_send(can_dev, msg, TEST_SEND_TIMEOUT,
-				       tx_ext_masked_isr, msg);
-		}
-	}
-
+	ret = can_send(can_dev, msg, TEST_SEND_TIMEOUT);
 	zassert_not_equal(ret, CAN_TX_ARB_LOST,
 			  "Arbitration though in loopback mode");
 	zassert_equal(ret, CAN_TX_OK, "Can't send a message. Err: %d", ret);
@@ -358,11 +330,29 @@ static inline int attach_isr(const struct device *can_dev,
 	return filter_id;
 }
 
+static can_tx_callback_t get_callback(struct zcan_frame *msg)
+{
+	if (msg->id_type == CAN_STANDARD_IDENTIFIER) {
+		if (msg->id == TEST_CAN_STD_ID) {
+			return tx_std_isr;
+		} else {
+			return tx_std_masked_isr;
+		}
+	} else {
+		if (msg->id == TEST_CAN_EXT_ID) {
+			return tx_ext_isr;
+		} else {
+			return tx_ext_masked_isr;
+		}
+	}
+}
+
 static void send_receive(const struct zcan_filter *filter, struct zcan_frame *msg)
 {
 	int ret, filter_id;
 	struct zcan_frame msg_buffer;
 	uint32_t mask = 0U;
+	struct can_send_ctx ctx;
 
 	zassert_not_null(can_dev, "Device not not found");
 
@@ -386,7 +376,11 @@ static void send_receive(const struct zcan_filter *filter, struct zcan_frame *ms
 
 	k_sem_reset(&tx_cb_sem);
 	filter_id = attach_isr(can_dev, filter);
-	send_test_msg_nowait(can_dev, msg);
+	can_send_ctx_init(&ctx, msg, 1, get_callback(msg), msg);
+	ret = can_send_async(can_dev, TEST_SEND_TIMEOUT, &ctx);
+	zassert_not_equal(ret, CAN_TX_ARB_LOST,
+			  "Arbitration though in loopback mode");
+	zassert_equal(ret, CAN_TX_OK, "Can't send a message. Err: %d", ret);
 	ret = k_sem_take(&rx_isr_sem, TEST_RECEIVE_TIMEOUT);
 	zassert_equal(ret, 0, "Receiving timeout");
 	ret = k_sem_take(&tx_cb_sem, TEST_SEND_TIMEOUT);
@@ -479,10 +473,15 @@ static void test_receive_timeout(void)
 static void test_send_callback(void)
 {
 	int ret;
+	struct can_send_ctx ctx;
 
 	k_sem_reset(&tx_cb_sem);
 
-	send_test_msg_nowait(can_dev, &test_std_msg);
+	can_send_ctx_init(&ctx, &test_std_msg, 1, tx_std_isr, &test_std_msg);
+	ret = can_send_async(can_dev, TEST_SEND_TIMEOUT, &ctx);
+	zassert_not_equal(ret, CAN_TX_ARB_LOST,
+			  "Arbitration though in loopback mode");
+	zassert_equal(ret, CAN_TX_OK, "Can't send a message. Err: %d", ret);
 
 	ret = k_sem_take(&tx_cb_sem, TEST_SEND_TIMEOUT);
 	zassert_equal(ret, 0, "Missing TX callback");
@@ -596,7 +595,7 @@ static void test_send_invalid_dlc(void)
 
 	frame.dlc = CAN_MAX_DLC + 1;
 
-	ret = can_send(can_dev, &frame, TEST_SEND_TIMEOUT, tx_std_isr, NULL);
+	ret = can_send(can_dev, &frame, TEST_SEND_TIMEOUT);
 	zassert_equal(ret, CAN_TX_EINVAL,
 		      "ret [%d] not equal to %d", ret, CAN_TX_EINVAL);
 }
