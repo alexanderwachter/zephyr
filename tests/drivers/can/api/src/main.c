@@ -376,7 +376,7 @@ static void send_receive(const struct zcan_filter *filter, struct zcan_frame *ms
 
 	k_sem_reset(&tx_cb_sem);
 	filter_id = attach_isr(can_dev, filter);
-	can_send_ctx_init(&ctx, msg, 1, get_callback(msg), msg);
+	can_send_ctx_init(&ctx, msg, get_callback(msg), msg);
 	ret = can_send_async(can_dev, TEST_SEND_TIMEOUT, &ctx);
 	zassert_not_equal(ret, CAN_TX_ARB_LOST,
 			  "Arbitration though in loopback mode");
@@ -477,7 +477,7 @@ static void test_send_callback(void)
 
 	k_sem_reset(&tx_cb_sem);
 
-	can_send_ctx_init(&ctx, &test_std_msg, 1, tx_std_isr, &test_std_msg);
+	can_send_ctx_init(&ctx, &test_std_msg, tx_std_isr, &test_std_msg);
 	ret = can_send_async(can_dev, TEST_SEND_TIMEOUT, &ctx);
 	zassert_not_equal(ret, CAN_TX_ARB_LOST,
 			  "Arbitration though in loopback mode");

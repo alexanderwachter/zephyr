@@ -310,7 +310,6 @@ struct can_send_ctx {
 	can_tx_callback_t cb;
 	void *user_data;
 	const struct zcan_frame *frame;
-	size_t frames_cnt;
 	k_timeout_t timeout;
 };
 
@@ -442,13 +441,12 @@ __syscall int can_send(const struct device *dev, const struct zcan_frame *frame,
  */
 static inline
 void can_send_ctx_init(struct can_send_ctx *ctx,
-		       const struct zcan_frame *frame, size_t len,
+		       const struct zcan_frame *frame,
 		       can_tx_callback_t callback_isr, void *user_data)
 {
 	ctx->cb = callback_isr;
 	ctx->user_data = user_data;
 	ctx->frame = frame;
-	ctx->frames_cnt = len;
 }
 
 /**

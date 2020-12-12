@@ -258,7 +258,7 @@ void main(void)
 
 	can_register_state_change_isr(can_dev, state_change_isr);
 
-	can_send_ctx_init(&ctx, &change_led_frame, 1, tx_irq_callback,
+	can_send_ctx_init(&ctx, &change_led_frame, tx_irq_callback,
 			  "LED change");
 
 	printk("Finished init.\n");
