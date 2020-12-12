@@ -142,46 +142,78 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 {
 	const struct can_stm32_config *cfg = DEV_CFG(dev);
 	CAN_TypeDef *can = cfg->can;
-	uint32_t bus_off;
 	sys_snode_t *node;
 	struct can_send_ctx *next_ctx;
 	int res;
 
-	bus_off = can->ESR & CAN_ESR_BOFF;
-
-	if ((can->TSR & CAN_TSR_RQCP0) | bus_off) {
-		res = can->TSR & CAN_TSR_TXOK0 ? CAN_TX_OK  :
-		      can->TSR & CAN_TSR_TERR0 ? CAN_TX_ERR :
-		      can->TSR & CAN_TSR_ALST0 ? CAN_TX_ARB_LOST :
-		      bus_off                  ? CAN_TX_BUS_OFF :
-						 CAN_TX_UNKNOWN;
+	if ((can->TSR & CAN_TSR_RQCP0)) {
+		if (can->TSR & CAN_TSR_TXOK0) {
+			res = CAN_TX_OK;
+		} else if (can->TSR & CAN_TSR_ALST0) {
+			res = CAN_TX_ARB_LOST;
+		} else if (can->ESR & CAN_ESR_BOFF) {
+			res = CAN_TX_BUS_OFF;
+		} else if (can->TSR & CAN_TSR_TERR0) {
+			res = CAN_TX_ERR;
+		} else {
+			if (can_check_timeout(data->mb[0].ctx)) {
+				res = CAN_TX_TIMEOUT;
+			} else {
+				can_put_back_tx(&data->common_ctx, data->mb[0].ctx);
+				res = CAN_TX_ABORT;
+			}
+		}
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP0;
-		data->mb0.ctx->cb(dev, data->mb0.ctx->user_data, res);
+
+		data->mb[0].ctx->cb(dev, data->mb[0].ctx->user_data, res);
 	}
 
-	if ((can->TSR & CAN_TSR_RQCP1) | bus_off) {
-		res = can->TSR & CAN_TSR_TXOK1 ? CAN_TX_OK  :
-		      can->TSR & CAN_TSR_TERR1 ? CAN_TX_ERR :
-		      can->TSR & CAN_TSR_ALST1 ? CAN_TX_ARB_LOST :
-		      bus_off                  ? CAN_TX_BUS_OFF :
-						 CAN_TX_UNKNOWN;
+	if ((can->TSR & CAN_TSR_RQCP1)) {
+		if (can->TSR & CAN_TSR_TXOK1) {
+			res = CAN_TX_OK;
+		} else if (can->TSR & CAN_TSR_ALST1) {
+			res = CAN_TX_ARB_LOST;
+		} else if (can->ESR & CAN_ESR_BOFF) {
+			res = CAN_TX_BUS_OFF;
+		} else if (can->TSR & CAN_TSR_TERR1) {
+			res = CAN_TX_ERR;
+		} else {
+			if (can_check_timeout(data->mb[1].ctx)) {
+				res = CAN_TX_TIMEOUT;
+			} else {
+				can_put_back_tx(&data->common_ctx, data->mb[1].ctx);
+				res = CAN_TX_ABORT;
+			}
+		}
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP1;
-		data->mb1.ctx->cb(dev, data->mb1.ctx->user_data, res);
+
+		data->mb[1].ctx->cb(dev, data->mb[1].ctx->user_data, res);
 	}
 
-	if ((can->TSR & CAN_TSR_RQCP2) | bus_off) {
-		res = can->TSR & CAN_TSR_TXOK2 ? CAN_TX_OK  :
-		      can->TSR & CAN_TSR_TERR2 ? CAN_TX_ERR :
-		      can->TSR & CAN_TSR_ALST2 ? CAN_TX_ARB_LOST :
-		      bus_off                  ? CAN_TX_BUS_OFF :
-						 CAN_TX_UNKNOWN;
+	if ((can->TSR & CAN_TSR_RQCP2)) {
+		if (can->TSR & CAN_TSR_TXOK2) {
+			res = CAN_TX_OK;
+		} else if (can->TSR & CAN_TSR_ALST2) {
+			res = CAN_TX_ARB_LOST;
+		} else if (can->ESR & CAN_ESR_BOFF) {
+			res = CAN_TX_BUS_OFF;
+		} else if (can->TSR & CAN_TSR_TERR2) {
+			res = CAN_TX_ERR;
+		} else {
+			if (can_check_timeout(data->mb[2].ctx)) {
+				res = CAN_TX_TIMEOUT;
+			} else {
+				can_put_back_tx(&data->common_ctx, data->mb[2].ctx);
+				res = CAN_TX_ABORT;
+			}
+		}
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP2;
-		data->mb2.ctx->cb(dev, data->mb2.ctx->user_data, res);
-	}
 
+		data->mb[2].ctx->cb(dev, data->mb[2].ctx->user_data, res);
+	}
 	if (can->TSR & CAN_TSR_TME) {
 		node = sys_slist_get(&data->common_ctx.send_list);
 		if (node) {
@@ -596,6 +628,21 @@ done:
 }
 #endif /* CONFIG_CAN_AUTO_BUS_OFF_RECOVERY */
 
+static inline void can_stm32_abort_frame(CAN_TypeDef *can, uint8_t mb_nr)
+{
+	switch (mb_nr) {
+	case 0:
+		can->TSR |= CAN_TSR_ABRQ0;
+		break;
+	case 1:
+		can->TSR |= CAN_TSR_ABRQ1;
+		break;
+	case 2:
+		can->TSR |= CAN_TSR_ABRQ2;
+		break;
+	}
+}
+
 int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
 {
 	const struct can_stm32_config *cfg = DEV_CFG(dev);
@@ -604,6 +651,8 @@ int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
 	CAN_TxMailBox_TypeDef *mailbox = NULL;
 	const struct zcan_frame *frame = ctx->frame;
 	struct z_spinlock_key key;
+	uint8_t mb_nr;
+	uint32_t tsr_snapshot;
 
 	if (frame->dlc > CAN_MAX_DLC) {
 		LOG_ERR("DLC of %d exceeds maximum (%d)", frame->dlc, CAN_MAX_DLC);
@@ -615,28 +664,23 @@ int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
 	}
 
 	key = k_spin_lock(&data->common_ctx.lock);
+	tsr_snapshot = can->TSR;
+	mb_nr = (tsr_snapshot & CAN_TSR_CODE_Msk) >> CAN_TSR_CODE_Pos;
 
-	if (!(can->TSR & CAN_TSR_TME)) {
+	/* No free mailbox. bm_nr holds lowest prio mb */
+	if (!(tsr_snapshot & CAN_TSR_TME)) {
+		/* New frame has higher prio, kick out the pending one */
+		if (can_frame_prio_higher(ctx->frame, data->mb[mb_nr].ctx->frame)) {
+			can_stm32_abort_frame(can, mb_nr);
+		}
+
 		k_spin_unlock(&data->common_ctx.lock, key);
 		return CAN_TX_BUSY;
 	}
 
-	if (can->TSR & CAN_TSR_TME0) {
-		LOG_DBG("Using mailbox 0");
-		mailbox = &can->sTxMailBox[0];
-		data->mb0.ctx = ctx;
-	} else if (can->TSR  & CAN_TSR_TME1) {
-		LOG_DBG("Using mailbox 1");
-		mailbox = &can->sTxMailBox[1];
-		data->mb1.ctx = ctx;
-	} else if (can->TSR  & CAN_TSR_TME2) {
-		LOG_DBG("Using mailbox 2");
-		mailbox = &can->sTxMailBox[2];
-		data->mb2.ctx = ctx;
-	} else {
-		k_spin_unlock(&data->common_ctx.lock, key);
-		return CAN_TX_UNKNOWN;
-	}
+	LOG_DBG("Using mailbox %u", mb_nr);
+	data->mb[mb_nr].ctx = ctx;
+	mailbox = &can->sTxMailBox[mb_nr];
 
 	LOG_DBG("Sending %d bytes on %s. "
 		"Id: 0x%x, "
