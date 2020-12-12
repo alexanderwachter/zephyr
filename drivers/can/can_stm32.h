@@ -57,9 +57,7 @@ struct can_stm32_data {
 	struct can_tx_driver_ctx common_ctx;
 	struct k_mutex inst_mutex;
 	struct k_sem tx_int_sem;
-	struct can_mailbox mb0;
-	struct can_mailbox mb1;
-	struct can_mailbox mb2;
+	struct can_mailbox mb[3];
 	uint64_t filter_usage;
 	can_rx_callback_t rx_cb[CONFIG_CAN_MAX_FILTER];
 	void *cb_arg[CONFIG_CAN_MAX_FILTER];

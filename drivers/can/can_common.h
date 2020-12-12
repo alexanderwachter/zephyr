@@ -21,5 +21,8 @@ struct can_tx_driver_ctx {
 
 bool can_frame_prio_higher(const struct zcan_frame *frame1,
 			   const struct zcan_frame *frame2);
+void can_put_back_tx(struct can_tx_driver_ctx *ctx,
+		     struct can_send_ctx *send_ctx);
+bool can_check_timeout(struct can_send_ctx *ctx);
 
 #endif /*ZEPHYR_DRIVERS_CAN_COMMON_H_*/

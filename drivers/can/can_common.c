@@ -144,6 +144,11 @@ int can_attach_workq(const struct device *dev, struct k_work_q *work_q,
 	return api->attach_isr(dev, can_work_isr_put, work, filter);
 }
 
+bool can_check_timeout(struct can_send_ctx *ctx)
+{
+	return ctx->timeout.ticks >= k_uptime_ticks();
+}
+
 static struct can_send_ctx *can_get_next_tx_to(struct can_tx_driver_ctx *ctx)
 {
 	sys_snode_t *node = sys_slist_peek_head(&ctx->send_list);
@@ -238,6 +243,21 @@ bool can_frame_prio_higher(const struct zcan_frame *frame1,
 	return false;
 }
 
+bool can_frame_prio_higher_equal(const struct zcan_frame *frame1,
+				 const struct zcan_frame *frame2)
+{
+	if (frame1->id_type == frame2->id_type) {
+		return frame1->id >= frame2->id;
+	}
+
+	/* standard ID has higher prio than extended ID */
+	if (frame1->id_type == CAN_STANDARD_IDENTIFIER) {
+		return true;
+	}
+
+	return false;
+}
+
 static inline void can_insert_tx_ctx(struct can_tx_driver_ctx *ctx,
 				     struct can_send_ctx *send_ctx)
 {
@@ -267,6 +287,32 @@ static inline void can_insert_tx_ctx(struct can_tx_driver_ctx *ctx,
 	}
 
 	sys_slist_prepend(&ctx->send_list, &send_ctx->node);
+}
+
+void can_put_back_tx(struct can_tx_driver_ctx *ctx,
+		     struct can_send_ctx *send_ctx)
+{
+	sys_snode_t *node = sys_slist_peek_tail(&ctx->send_list);
+	const struct zcan_frame *frame = send_ctx->frame;
+	struct can_send_ctx *send_ctx_next;
+
+	if (node == 0) {
+		sys_slist_append(&ctx->send_list, &send_ctx->node);
+		return;
+	}
+
+	send_ctx_next = CONTAINER_OF(node, struct can_send_ctx, node);
+	if (can_frame_prio_higher_equal(frame, send_ctx_next->frame)) {
+		sys_slist_prepend(&ctx->send_list, &send_ctx->node);
+		return;
+	}
+
+	SYS_SLIST_ITERATE_FROM_NODE(&ctx->send_list, node) {
+		send_ctx_next = CONTAINER_OF(node, struct can_send_ctx, node);
+		if (!can_frame_prio_higher_equal(frame, send_ctx_next->frame)) {
+			sys_slist_insert(&ctx->send_list, node, &send_ctx->node);
+		}
+	}
 }
 
 int can_queue_tx(struct can_tx_driver_ctx *ctx, struct can_send_ctx *send_ctx)
