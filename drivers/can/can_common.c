@@ -348,7 +348,7 @@ int can_send_async(const struct device *dev, k_timeout_t frame_timeout,
 	struct can_tx_driver_ctx *ctx = (struct can_tx_driver_ctx *) dev->data;
 	int ret;
 
-	if (!send_ctx->cb || !send_ctx->frame || !send_ctx->frames_cnt) {
+	if (!send_ctx->cb || !send_ctx->frame) {
 		LOG_ERR("Invalid send_ctx");
 		return CAN_TX_EINVAL;
 	}
@@ -383,7 +383,7 @@ int z_impl_can_send(const struct device *dev, const struct zcan_frame *frame,
 	int res;
 
 	k_sem_init(&data.sem, 0, 1);
-	can_send_ctx_init(&ctx, frame, 1, can_send_cb, &data);
+	can_send_ctx_init(&ctx, frame, can_send_cb, &data);
 	res = can_send_async(dev, frame_timeout, &ctx);
 	if (res != CAN_TX_OK) {
 		return res;
