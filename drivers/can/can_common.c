@@ -146,7 +146,7 @@ int can_attach_workq(const struct device *dev, struct k_work_q *work_q,
 
 bool can_check_timeout(struct can_send_ctx *ctx)
 {
-	return ctx->timeout.ticks >= k_uptime_ticks();
+	return ctx->timeout.ticks < k_uptime_ticks();
 }
 
 static struct can_send_ctx *can_get_next_tx_to(struct can_tx_driver_ctx *ctx)
@@ -174,7 +174,10 @@ static void can_tx_timeout_handle(struct can_tx_driver_ctx *ctx,
 				  struct can_send_ctx *send_ctx)
 {
 	sys_slist_find_and_remove(&ctx->send_list, &send_ctx->node);
+
+	if (send_ctx->cb) {
 	send_ctx->cb(NULL /*TODO get dev*/, send_ctx->user_data, CAN_TX_TIMEOUT);
+	}
 }
 
 static void can_tx_timeout(struct _timeout *to)
@@ -185,22 +188,24 @@ static void can_tx_timeout(struct _timeout *to)
 	struct  z_spinlock_key key;
 	k_timeout_t next_timeout;
 
+	LOG_DBG("Frame timed out");
+
 	can_tx_timeout_handle(ctx, ctx->next_to);
 
+	while (1) {
 	key = k_spin_lock(&ctx->lock);
-
-	while (!sys_slist_is_empty(&ctx->send_list)) {
 		next_to = can_get_next_tx_to(ctx);
 		k_spin_unlock(&ctx->lock, key);
 		if (next_to->timeout.ticks <= k_uptime_ticks()) {
 			can_tx_timeout_handle(ctx, next_to);
-			key = k_spin_lock(&ctx->lock);
-			continue;
+			if (sys_slist_is_empty(&ctx->send_list)) {
+				break;
 		}
-
+		} else {
 		next_timeout.ticks = next_to->timeout.ticks - k_uptime_ticks();
 		z_add_timeout(&ctx->to, can_tx_timeout, next_timeout);
 		break;
+	}
 	}
 }
 
@@ -223,7 +228,9 @@ static int can_abort_tx(struct can_tx_driver_ctx *ctx,
 
 	k_spin_unlock(&ctx->lock, key);
 
+	if (send_ctx->cb) {
 	send_ctx->cb(NULL /*dev*/, send_ctx->user_data, CAN_TX_ABORT);
+	}
 
 	return CAN_TX_OK;
 }
@@ -232,7 +239,7 @@ bool can_frame_prio_higher(const struct zcan_frame *frame1,
 			   const struct zcan_frame *frame2)
 {
 	if (frame1->id_type == frame2->id_type) {
-		return frame1->id > frame2->id;
+		return frame1->id < frame2->id;
 	}
 
 	/* standard ID has higher prio than extended ID */
@@ -247,7 +254,7 @@ bool can_frame_prio_higher_equal(const struct zcan_frame *frame1,
 				 const struct zcan_frame *frame2)
 {
 	if (frame1->id_type == frame2->id_type) {
-		return frame1->id >= frame2->id;
+		return frame1->id <= frame2->id;
 	}
 
 	/* standard ID has higher prio than extended ID */
@@ -261,26 +268,33 @@ bool can_frame_prio_higher_equal(const struct zcan_frame *frame1,
 static inline void can_insert_tx_ctx(struct can_tx_driver_ctx *ctx,
 				     struct can_send_ctx *send_ctx)
 {
-	sys_snode_t *prev_node = sys_slist_peek_head(&ctx->send_list);
-	sys_snode_t *node = sys_slist_peek_next(prev_node);
+	sys_snode_t *node = sys_slist_peek_head(&ctx->send_list);
+	sys_snode_t *node_next;
 	struct can_send_ctx *send_ctx_next;
 	const struct zcan_frame *frame = send_ctx->frame;
 
-	if (prev_node == NULL ||
+	if (node == NULL ||
 	    can_frame_prio_higher(frame,
-				  CONTAINER_OF(prev_node, struct can_send_ctx, node)->frame)) {
+				  CONTAINER_OF(node, struct can_send_ctx, node)->frame)) {
+		LOG_DBG("Append to head");
 		sys_slist_append(&ctx->send_list, &send_ctx->node);
+		return;
 	}
 
-	if (node == NULL) {
+	if (sys_slist_peek_next(node) == NULL) {
+		LOG_DBG("Only one node. prepend");
 		sys_slist_prepend(&ctx->send_list, &send_ctx->node);
 		return;
 	}
 
-	SYS_SLIST_ITERATE_FROM_NODE(&ctx->send_list, node) {
-		send_ctx_next = CONTAINER_OF(node, struct can_send_ctx, node);
+	SYS_SLIST_FOR_EACH_NODE_SAFE(&ctx->send_list, node, node_next) {
+		if (node_next == NULL) {
+			break;
+		}
+		send_ctx_next = CONTAINER_OF(node_next, struct can_send_ctx, node);
+		LOG_DBG("Check node with id: %d,data: %d", send_ctx_next->frame->id, send_ctx_next->frame->data[0]);
 		if (can_frame_prio_higher(frame, send_ctx_next->frame)) {
-			sys_slist_insert(&ctx->send_list, prev_node,
+			sys_slist_insert(&ctx->send_list, node,
 					 &send_ctx->node);
 			return;
 		}
@@ -297,22 +311,28 @@ void can_put_back_tx(struct can_tx_driver_ctx *ctx,
 	struct can_send_ctx *send_ctx_next;
 
 	if (node == 0) {
+		LOG_DBG("Append to head");
 		sys_slist_append(&ctx->send_list, &send_ctx->node);
 		return;
 	}
 
 	send_ctx_next = CONTAINER_OF(node, struct can_send_ctx, node);
 	if (can_frame_prio_higher_equal(frame, send_ctx_next->frame)) {
+		LOG_DBG("Prepend to tail");
 		sys_slist_prepend(&ctx->send_list, &send_ctx->node);
 		return;
 	}
 
-	SYS_SLIST_ITERATE_FROM_NODE(&ctx->send_list, node) {
+	SYS_SLIST_FOR_EACH_NODE(&ctx->send_list, node) {
 		send_ctx_next = CONTAINER_OF(node, struct can_send_ctx, node);
 		if (!can_frame_prio_higher_equal(frame, send_ctx_next->frame)) {
 			sys_slist_insert(&ctx->send_list, node, &send_ctx->node);
+			LOG_DBG("Inserted");
+			return;
 		}
 	}
+
+
 }
 
 int can_queue_tx(struct can_tx_driver_ctx *ctx, struct can_send_ctx *send_ctx)
@@ -348,15 +368,17 @@ int can_send_async(const struct device *dev, k_timeout_t frame_timeout,
 	struct can_tx_driver_ctx *ctx = (struct can_tx_driver_ctx *) dev->data;
 	int ret;
 
-	if (!send_ctx->cb || !send_ctx->frame) {
+	if (!send_ctx->frame) {
 		LOG_ERR("Invalid send_ctx");
 		return CAN_TX_EINVAL;
 	}
 
 	send_ctx->timeout.ticks = frame_timeout.ticks + k_uptime_ticks();
+	send_ctx->node.next = NULL;
 
 	ret = api->send(dev, send_ctx);
 	if (ret == CAN_TX_BUSY) {
+		LOG_DBG("Controlle busy. Queue message");
 		ret = can_queue_tx(ctx, send_ctx);
 	}
 
@@ -478,6 +500,10 @@ static int can_calc_timing_int(uint32_t core_clock, struct can_timing *res,
 
 	if (sp_err_min) {
 		LOG_DBG("SP error: %d 1/1000", sp_err_min);
+	}
+
+	if (sp_err_min == UINT16_MAX) {
+		LOG_ERR("Could not find timing");
 	}
 
 	return sp_err_min == UINT16_MAX ? -EINVAL : (int)sp_err_min;

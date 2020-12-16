@@ -51,7 +51,7 @@
 #define CAN_DEVICE_NAME DT_CHOSEN_ZEPHYR_CAN_PRIMARY_LABEL
 #endif
 
-CAN_DEFINE_MSGQ(can_msgq, 5);
+CAN_DEFINE_MSGQ(can_msgq, 8);
 struct k_sem rx_isr_sem;
 struct k_sem rx_cb_sem;
 struct k_sem tx_cb_sem;
@@ -640,6 +640,116 @@ static void test_send_callback(void)
 	zassert_equal(ret, 0, "Missing TX callback");
 }
 
+
+const struct zcan_frame test_msg_queued[] = {
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 2,
+		.dlc     = 8,
+		.data    = {1,0,0,0,0,0,0,0}
+	},
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 3,
+		.dlc     = 8,
+		.data    = {1,0,0,0,0,0,0,0}
+	},
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 4,
+		.dlc     = 8,
+		.data    = {2,0,0,0,0,0,0,0}
+	},
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 5,
+		.dlc     = 8,
+		.data    = {3,0,0,0,0,0,0,0}
+	},
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 7,
+		.dlc     = 8,
+		.data    = {5,0,0,0,0,0,0,0}
+	},
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 6,
+		.dlc     = 8,
+		.data    = {4,0,0,0,0,0,0,0}
+	},
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 8,
+		.dlc     = 8,
+		.data    = {6,0,0,0,0,0,0,0}
+	},
+	{
+		.id_type = CAN_STANDARD_IDENTIFIER,
+		.rtr     = CAN_DATAFRAME,
+		.id      = 1,
+		.dlc     = 8,
+		.data    = {0,0,0,0,0,0,0,0}
+	}
+};
+
+const struct zcan_filter test_queued_filter = {
+	.id_type = CAN_STANDARD_IDENTIFIER,
+	.rtr = CAN_DATAFRAME,
+	.id = 0,
+	.rtr_mask = 1,
+	.id_mask = 0
+};
+
+CAN_DEFINE_MSGQ(can_msgq_, 8);
+
+/*
+ * Test send queuing for outgoing messages
+ */
+static void test_send_queued(void)
+{
+	int ret;
+	struct zcan_frame frame_buffer;
+	int filter_id;
+
+	/* Set normal mode to prevent messages going out */
+	//ret = can_set_mode(can_dev, CAN_NORMAL_MODE);
+	can_set_bitrate(can_dev, 2500, 0);
+	//zassert_equal(ret, 0, "Can't set normal mode. Err: %d", ret);
+	filter_id = can_attach_msgq(can_dev, &can_msgq_, &test_queued_filter);
+	zassert_not_equal(filter_id, CAN_NO_FREE_FILTER,
+			  "Filter full even for a single one");
+
+	struct can_send_ctx ctx[ARRAY_SIZE(test_msg_queued)];
+	int64_t start = k_uptime_get();
+	for (int i = ARRAY_SIZE(test_msg_queued) - 1; i >= 0; --i) {
+		can_send_ctx_init(&ctx[i], &test_msg_queued[i], NULL, NULL);
+		can_send_async(can_dev, TEST_SEND_TIMEOUT, &ctx[i]);
+	}
+
+	int64_t time = k_uptime_delta(&start);
+	printk("sending took %d ns\n", k_ticks_to_ns_ceil32(time));
+
+	ret = can_set_mode(can_dev, CAN_LOOPBACK_MODE);
+
+	for (int i = 0; i < ARRAY_SIZE(test_msg_queued); ++i){
+		ret = k_msgq_get(&can_msgq_, &frame_buffer, TEST_RECEIVE_TIMEOUT);
+		zassert_equal(ret, 0, "Receiving timeout");
+		printk("id: %d, data: %d\n",frame_buffer.id, frame_buffer.data[0]);
+		//zassert_equal(I, frame_buffer.data[0], "Expected %d got %d",
+			//      i, frame_buffer.data[0]);
+	}
+
+	can_detach(can_dev, filter_id);
+}
+
 /*
  * Attach to a filter that should pass the message and send the message.
  * The massage should be received within a small timeout.
@@ -772,6 +882,7 @@ void test_main(void)
 			 ztest_unit_test(test_filter_attach),
 			 ztest_unit_test(test_receive_timeout),
 			 ztest_unit_test(test_send_callback),
+			 ztest_unit_test(test_send_queued),
 			 ztest_unit_test(test_send_receive_std),
 			 ztest_unit_test(test_send_invalid_dlc),
 			 ztest_unit_test(test_send_receive_ext),

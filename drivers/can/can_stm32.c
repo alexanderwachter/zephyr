@@ -158,15 +158,19 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		} else {
 			if (can_check_timeout(data->mb[0].ctx)) {
 				res = CAN_TX_TIMEOUT;
+				LOG_DBG("MB 0 timeout");
 			} else {
+				LOG_DBG("MB 0 aborted");
 				can_put_back_tx(&data->common_ctx, data->mb[0].ctx);
 				res = CAN_TX_ABORT;
 			}
 		}
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP0;
-
+		if (data->mb[0].ctx->cb  && res != CAN_TX_ABORT) {
 		data->mb[0].ctx->cb(dev, data->mb[0].ctx->user_data, res);
+	}
+
 	}
 
 	if ((can->TSR & CAN_TSR_RQCP1)) {
@@ -181,7 +185,9 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		} else {
 			if (can_check_timeout(data->mb[1].ctx)) {
 				res = CAN_TX_TIMEOUT;
+				LOG_DBG("MB 1 timeout");
 			} else {
+				LOG_DBG("MB 1 aborted");
 				can_put_back_tx(&data->common_ctx, data->mb[1].ctx);
 				res = CAN_TX_ABORT;
 			}
@@ -189,7 +195,9 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP1;
 
+		if (data->mb[1].ctx->cb && res != CAN_TX_ABORT) {
 		data->mb[1].ctx->cb(dev, data->mb[1].ctx->user_data, res);
+	}
 	}
 
 	if ((can->TSR & CAN_TSR_RQCP2)) {
@@ -204,7 +212,9 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		} else {
 			if (can_check_timeout(data->mb[2].ctx)) {
 				res = CAN_TX_TIMEOUT;
+				LOG_DBG("MB 2 timeout");
 			} else {
+				LOG_DBG("MB 2 aborted");
 				can_put_back_tx(&data->common_ctx, data->mb[2].ctx);
 				res = CAN_TX_ABORT;
 			}
@@ -212,8 +222,11 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP2;
 
+		if (data->mb[2].ctx->cb && res != CAN_TX_ABORT) {
 		data->mb[2].ctx->cb(dev, data->mb[2].ctx->user_data, res);
 	}
+	}
+
 	if (can->TSR & CAN_TSR_TME) {
 		node = sys_slist_get(&data->common_ctx.send_list);
 		if (node) {
@@ -458,6 +471,7 @@ static int can_stm32_init(const struct device *dev)
 
 	k_mutex_init(&data->inst_mutex);
 	data->state_change_isr = NULL;
+	sys_slist_init(&data->common_ctx.send_list);
 
 	data->filter_usage = (1ULL << CAN_MAX_NUMBER_OF_FILTERS) - 1ULL;
 	(void)memset(data->rx_cb, 0, sizeof(data->rx_cb));
@@ -496,10 +510,8 @@ static int can_stm32_init(const struct device *dev)
 	master_can->FMR &= ~CAN_FMR_CAN2SB; /* Assign all filters to CAN2 */
 #endif
 
-	/* Set TX priority to chronological order */
-	can->MCR |= CAN_MCR_TXFP;
-	can->MCR &= ~CAN_MCR_TTCM & ~CAN_MCR_ABOM & ~CAN_MCR_AWUM &
-		    ~CAN_MCR_NART & ~CAN_MCR_RFLM;
+	can->MCR &= ~CAN_MCR_TTCM & ~CAN_MCR_TTCM & ~CAN_MCR_ABOM &
+		    ~CAN_MCR_AWUM & ~CAN_MCR_NART & ~CAN_MCR_RFLM;
 #ifdef CONFIG_CAN_RX_TIMESTAMP
 	can->MCR |= CAN_MCR_TTCM;
 #endif
@@ -660,6 +672,7 @@ int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
 		return CAN_TX_BUS_OFF;
 	}
 
+
 	key = k_spin_lock(&data->common_ctx.lock);
 	tsr_snapshot = can->TSR;
 	mb_nr = (tsr_snapshot & CAN_TSR_CODE_Msk) >> CAN_TSR_CODE_Pos;
@@ -668,6 +681,7 @@ int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
 	if (!(tsr_snapshot & CAN_TSR_TME)) {
 		/* New frame has higher prio, kick out the pending one */
 		if (can_frame_prio_higher(ctx->frame, data->mb[mb_nr].ctx->frame)) {
+			LOG_DBG("Frame with higher prio arrived. Abort mb %d", mb_nr);
 			can_stm32_abort_frame(can, mb_nr);
 	}
 
