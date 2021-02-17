@@ -1,0 +1,8 @@
+sample:
+  description: Demonstration of the TI INA229 Power/Energy/Charge monitor
+  name: INA229 sample
+tests:
+  sample.sensor.ens210:
+    harness: sensor
+    tags: samples
+    depends_on: spi arduino_spi
