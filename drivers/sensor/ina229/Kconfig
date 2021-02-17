@@ -1,0 +1,28 @@
+# INA229 Power / Energy / Charge Monitor configuration
+
+# Copyright (c) 2021 Alexander Wachter
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig INA229
+	bool "INA229 Power/Energy/Charge Monitor"
+	depends on SPI
+	help
+	  Enable driver for INA229 Power/Energy/Charge Monitor.
+
+if INA229
+
+config INA229_CONT_MODE
+	bool "Enable Energy/Charge counting"
+	default y
+	help
+	  Enable Power/Energy/Charge measurement.
+	  This implies that the measurements are running in continuous mode.
+
+config INA229_TEMP_COMP
+	bool "Enable temperature compensation"
+	default y
+	help
+	  Enable temperature compensation. This implies that the temperature
+	  measurment is enabled.
+
+endif #INA229

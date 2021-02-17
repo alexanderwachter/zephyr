@@ -1,0 +1,98 @@
+# Copyright (c) 2021 Alexander Wachter
+# SPDX-License-Identifier: Apache-2.0
+
+description: Texas Instruments INA229 Power / Energy / Charge Monitor
+
+compatible: "ti,ina229"
+
+include: spi-device.yaml
+
+properties:
+  adc-range-narrow:
+    type: boolean
+    required: false
+    description: |
+        Set the ADC range to 40.96mV. If false, the range is set to 163.84mV.
+
+  vbus-ct:
+    type: int
+    required: false
+    default: 540
+    description: |
+      Conversion time for the bus voltage measurement
+    enum:
+      - 50
+      - 84
+      - 150
+      - 280
+      - 540
+      - 1052
+      - 2074
+      - 4120
+
+  vshunt-ct:
+    type: int
+    required: false
+    default: 540
+    description: |
+      Conversion time for the shunt voltage measurement
+    enum:
+      - 50
+      - 84
+      - 150
+      - 280
+      - 540
+      - 1052
+      - 2074
+      - 4120
+
+  temp-ct:
+    type: int
+    required: false
+    default: 540
+    description: |
+      Conversion time for the temperature measurement
+    enum:
+      - 50
+      - 84
+      - 150
+      - 280
+      - 540
+      - 1052
+      - 2074
+      - 4120
+  
+  averaging:
+    type: int
+    required: false
+    default: 4
+    description: |
+      Conversion time for the temperature measurement
+    enum:
+      - 1
+      - 4
+      - 16
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+
+  res:
+    type: int
+    required: true
+    description: |
+      Shunt resistor value in milli-ohm
+
+  max-current:
+    type: int
+    required: true
+    description: |
+      maximum expected current value in mA.
+      Used to calculate the current LSB value.
+
+  temp-comp:
+    type: int
+    required: false
+    description: |
+      Resistor temperature compensation coefficient value in ppm/°C @ 25°C
