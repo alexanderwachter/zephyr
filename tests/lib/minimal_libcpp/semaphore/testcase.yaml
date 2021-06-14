@@ -1,0 +1,4 @@
+tests:
+  libmcu.MinimalLibCpp.semaphore:
+    tags: MinimalLibCpp semaphore
+    harness: ztest

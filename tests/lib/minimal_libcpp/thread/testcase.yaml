@@ -1,0 +1,4 @@
+tests:
+  libmcu.MinimalLibCpp.thread:
+    tags: MinimalLibCpp thread
+    harness: ztest

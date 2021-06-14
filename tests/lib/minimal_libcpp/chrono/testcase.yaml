@@ -1,0 +1,4 @@
+tests:
+  libmcu.MinimalLibCpp.chrono.steady_clock:
+    tags: MinimalLibCpp chrono
+    harness: ztest

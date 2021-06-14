@@ -1,0 +1,4 @@
+tests:
+  libmcu.MinimalLibCpp.recursive_mutex:
+    tags: MinimalLibCpp recursive_mutex
+    harness: ztest

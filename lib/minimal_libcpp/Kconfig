@@ -1,0 +1,8 @@
+# Copyright (c) 2021 Leica Geosystems AG
+# SPDX-License-Identifier: Apache-2.0
+
+config MINIMAL_LIB_CPP
+	bool "Enable a minimal implementation of the C++ library"
+	default y if !LIB_CPLUSPLUS && CPLUSPLUS
+  help
+    The MinimalLibCpp implements a small subset of the C++ libraray.

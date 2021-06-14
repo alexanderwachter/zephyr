@@ -1,0 +1,4 @@
+tests:
+  libmcu.MinimalLibCpp.condition_variable:
+    tags: MinimalLibCpp condition_variable
+    harness: ztest

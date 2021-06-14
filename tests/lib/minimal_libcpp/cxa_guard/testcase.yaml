@@ -1,0 +1,6 @@
+tests:
+
+  libmcu.MinimalLibCpp.cxa_guard:
+    tags: MinimalLibCpp cxa_guard
+    harness: ztest
+    platform_exclude: native_posix
