@@ -53,8 +53,6 @@ LOG_MODULE_DECLARE(can_driver, CONFIG_CAN_LOG_LEVEL);
 static const uint8_t filter_in_bank[] = {2, 4, 1, 2};
 static const uint8_t reg_demand[] = {2, 1, 4, 2};
 
-int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx);
-
 static void can_stm32_get_msg_fifo(CAN_FIFOMailBox_TypeDef *mbox,
 				    struct zcan_frame *msg)
 {
@@ -146,7 +144,7 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 	struct can_send_ctx *next_ctx;
 	int res;
 
-	if ((can->TSR & CAN_TSR_RQCP0)) {
+	if (can->TSR & CAN_TSR_RQCP0) {
 		if (can->TSR & CAN_TSR_TXOK0) {
 			res = CAN_TX_OK;
 		} else if (can->TSR & CAN_TSR_ALST0) {
@@ -156,24 +154,16 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		} else if (can->TSR & CAN_TSR_TERR0) {
 			res = CAN_TX_ERR;
 		} else {
-			if (can_check_timeout(data->mb[0].ctx)) {
-				res = CAN_TX_TIMEOUT;
-				LOG_DBG("MB 0 timeout");
-			} else {
-				LOG_DBG("MB 0 aborted");
-				can_put_back_tx(&data->common_ctx, data->mb[0].ctx);
 				res = CAN_TX_ABORT;
 			}
-		}
+
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP0;
-		if (data->mb[0].ctx->cb  && res != CAN_TX_ABORT) {
-		data->mb[0].ctx->cb(dev, data->mb[0].ctx->user_data, res);
+		can_common_mailbox_empty(dev, &data->common_ctx, 0, res);
 	}
 
-	}
 
-	if ((can->TSR & CAN_TSR_RQCP1)) {
+	if (can->TSR & CAN_TSR_RQCP1) {
 		if (can->TSR & CAN_TSR_TXOK1) {
 			res = CAN_TX_OK;
 		} else if (can->TSR & CAN_TSR_ALST1) {
@@ -183,24 +173,14 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		} else if (can->TSR & CAN_TSR_TERR1) {
 			res = CAN_TX_ERR;
 		} else {
-			if (can_check_timeout(data->mb[1].ctx)) {
-				res = CAN_TX_TIMEOUT;
-				LOG_DBG("MB 1 timeout");
-			} else {
-				LOG_DBG("MB 1 aborted");
-				can_put_back_tx(&data->common_ctx, data->mb[1].ctx);
 				res = CAN_TX_ABORT;
 			}
-		}
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP1;
-
-		if (data->mb[1].ctx->cb && res != CAN_TX_ABORT) {
-		data->mb[1].ctx->cb(dev, data->mb[1].ctx->user_data, res);
-	}
+		can_common_mailbox_empty(dev, &data->common_ctx, 1, res);
 	}
 
-	if ((can->TSR & CAN_TSR_RQCP2)) {
+	if (can->TSR & CAN_TSR_RQCP2) {
 		if (can->TSR & CAN_TSR_TXOK2) {
 			res = CAN_TX_OK;
 		} else if (can->TSR & CAN_TSR_ALST2) {
@@ -210,29 +190,11 @@ void can_stm32_tx_isr_handler(const struct device *dev,
 		} else if (can->TSR & CAN_TSR_TERR2) {
 			res = CAN_TX_ERR;
 		} else {
-			if (can_check_timeout(data->mb[2].ctx)) {
-				res = CAN_TX_TIMEOUT;
-				LOG_DBG("MB 2 timeout");
-			} else {
-				LOG_DBG("MB 2 aborted");
-				can_put_back_tx(&data->common_ctx, data->mb[2].ctx);
 				res = CAN_TX_ABORT;
 			}
-		}
 		/* clear the request. */
 		can->TSR |= CAN_TSR_RQCP2;
-
-		if (data->mb[2].ctx->cb && res != CAN_TX_ABORT) {
-		data->mb[2].ctx->cb(dev, data->mb[2].ctx->user_data, res);
-	}
-	}
-
-	if (can->TSR & CAN_TSR_TME) {
-		node = sys_slist_get(&data->common_ctx.send_list);
-		if (node) {
-			next_ctx = CONTAINER_OF(node, struct can_send_ctx, node);
-			can_stm32_send(dev, next_ctx);
-		}
+		can_common_mailbox_empty(dev, &data->common_ctx, 2, res);
 	}
 }
 
@@ -273,13 +235,7 @@ static void can_stm32_rx_isr(const struct device *dev)
 
 static void can_stm32_tx_isr(const struct device *dev)
 {
-	struct can_stm32_data *data;
-	const struct can_stm32_config *cfg;
-	CAN_TypeDef *can;
-
-	data = DEV_DATA(dev);
-	cfg = DEV_CFG(dev);
-	can = cfg->can;
+	struct can_stm32_data *data = DEV_DATA(dev);
 
 	can_stm32_tx_isr_handler(dev, data);
 }
@@ -637,9 +593,12 @@ done:
 }
 #endif /* CONFIG_CAN_AUTO_BUS_OFF_RECOVERY */
 
-static inline void can_stm32_abort_frame(CAN_TypeDef *can, uint8_t mb_nr)
+int can_stm32_abort(const struct device *dev, size_t mailbox_nr)
 {
-	switch (mb_nr) {
+	const struct can_stm32_config *cfg = DEV_CFG(dev);
+	CAN_TypeDef *can = cfg->can;
+
+	switch (mailbox_nr) {
 	case 0:
 		can->TSR |= CAN_TSR_ABRQ0;
 		break;
@@ -649,49 +608,31 @@ static inline void can_stm32_abort_frame(CAN_TypeDef *can, uint8_t mb_nr)
 	case 2:
 		can->TSR |= CAN_TSR_ABRQ2;
 		break;
+	default:
+		-1;
 	}
+
+	return 0;
 }
 
-int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
+int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx, k_timeout_t frame_timeout)
+{
+	struct can_stm32_data *data = DEV_DATA(dev);
+	return can_common_send_async(&data->common_ctx, frame_timeout, ctx);
+}
+
+int can_stm32_transfer(const struct device *dev, struct zcan_frame *frame, size_t mailbox_nr)
 {
 	const struct can_stm32_config *cfg = DEV_CFG(dev);
 	struct can_stm32_data *data = DEV_DATA(dev);
 	CAN_TypeDef *can = cfg->can;
 	CAN_TxMailBox_TypeDef *mailbox = NULL;
-	const struct zcan_frame *frame = ctx->frame;
-	struct z_spinlock_key key;
-	uint8_t mb_nr;
-	uint32_t tsr_snapshot;
-
-	if (frame->dlc > CAN_MAX_DLC) {
-		LOG_ERR("DLC of %d exceeds maximum (%d)", frame->dlc, CAN_MAX_DLC);
-		return CAN_TX_EINVAL;
-	}
 
 	if (can->ESR & CAN_ESR_BOFF) {
 		return CAN_TX_BUS_OFF;
 	}
 
-
-	key = k_spin_lock(&data->common_ctx.lock);
-	tsr_snapshot = can->TSR;
-	mb_nr = (tsr_snapshot & CAN_TSR_CODE_Msk) >> CAN_TSR_CODE_Pos;
-
-	/* No free mailbox. bm_nr holds lowest prio mb */
-	if (!(tsr_snapshot & CAN_TSR_TME)) {
-		/* New frame has higher prio, kick out the pending one */
-		if (can_frame_prio_higher(ctx->frame, data->mb[mb_nr].ctx->frame)) {
-			LOG_DBG("Frame with higher prio arrived. Abort mb %d", mb_nr);
-			can_stm32_abort_frame(can, mb_nr);
-	}
-
-		k_spin_unlock(&data->common_ctx.lock, key);
-		return CAN_TX_BUSY;
-	}
-
-	LOG_DBG("Using mailbox %u", mb_nr);
-	data->mb[mb_nr].ctx = ctx;
-	mailbox = &can->sTxMailBox[mb_nr];
+	mailbox = &can->sTxMailBox[mailbox_nr];
 
 	LOG_DBG("Sending %d bytes on %s. "
 		"Id: 0x%x, "
@@ -724,8 +665,6 @@ int can_stm32_send(const struct device *dev, struct can_send_ctx *ctx)
 	mailbox->TDHR = frame->data_32[1];
 
 	mailbox->TIR |= CAN_TI0R_TXRQ;
-
-	k_spin_unlock(&data->common_ctx.lock, key);
 
 	return CAN_TX_OK;
 }
@@ -1133,6 +1072,8 @@ static const struct can_driver_api can_api_funcs = {
 	.set_mode = can_stm32_set_mode,
 	.set_timing = can_stm32_set_timing,
 	.send = can_stm32_send,
+	.transfer = can_stm32_transfer,
+	.abort = can_stm32_abort,
 	.attach_isr = can_stm32_attach_isr,
 	.detach = can_stm32_detach,
 	.get_state = can_stm32_get_state,

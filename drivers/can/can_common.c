@@ -7,6 +7,7 @@
 #include <drivers/can.h>
 #include <kernel.h>
 #include <sys/util.h>
+#include <sys/types.h>
 #include "can_common.h"
 
 #define LOG_LEVEL CONFIG_CAN_LOG_LEVEL
@@ -144,9 +145,9 @@ int can_attach_workq(const struct device *dev, struct k_work_q *work_q,
 	return api->attach_isr(dev, can_work_isr_put, work, filter);
 }
 
-bool can_check_timeout(struct can_send_ctx *ctx)
+static bool can_check_timeout(struct can_send_ctx *ctx)
 {
-	return ctx->timeout.ticks < k_uptime_ticks();
+	return ctx->timeout.ticks >= k_uptime_ticks();
 }
 
 static struct can_send_ctx *can_get_next_tx_to(struct can_tx_driver_ctx *ctx)
@@ -176,7 +177,7 @@ static void can_tx_timeout_handle(struct can_tx_driver_ctx *ctx,
 	sys_slist_find_and_remove(&ctx->send_list, &send_ctx->node);
 
 	if (send_ctx->cb) {
-	send_ctx->cb(NULL /*TODO get dev*/, send_ctx->user_data, CAN_TX_TIMEOUT);
+		send_ctx->cb(NULL /*TODO get dev*/, send_ctx->user_data, CAN_TX_TIMEOUT);
 	}
 }
 
@@ -193,19 +194,19 @@ static void can_tx_timeout(struct _timeout *to)
 	can_tx_timeout_handle(ctx, ctx->next_to);
 
 	while (1) {
-	key = k_spin_lock(&ctx->lock);
+		key = k_spin_lock(&ctx->lock);
 		next_to = can_get_next_tx_to(ctx);
 		k_spin_unlock(&ctx->lock, key);
 		if (next_to->timeout.ticks <= k_uptime_ticks()) {
 			can_tx_timeout_handle(ctx, next_to);
 			if (sys_slist_is_empty(&ctx->send_list)) {
 				break;
-		}
+			}
 		} else {
-		next_timeout.ticks = next_to->timeout.ticks - k_uptime_ticks();
-		z_add_timeout(&ctx->to, can_tx_timeout, next_timeout);
-		break;
-	}
+			next_timeout.ticks = next_to->timeout.ticks - k_uptime_ticks();
+			z_add_timeout(&ctx->to, can_tx_timeout, next_timeout);
+			break;
+		}
 	}
 }
 
@@ -229,7 +230,7 @@ static int can_abort_tx(struct can_tx_driver_ctx *ctx,
 	k_spin_unlock(&ctx->lock, key);
 
 	if (send_ctx->cb) {
-	send_ctx->cb(NULL /*dev*/, send_ctx->user_data, CAN_TX_ABORT);
+		send_ctx->cb(NULL /*dev*/, send_ctx->user_data, CAN_TX_ABORT);
 	}
 
 	return CAN_TX_OK;
@@ -291,6 +292,7 @@ static inline void can_insert_tx_ctx(struct can_tx_driver_ctx *ctx,
 		if (node_next == NULL) {
 			break;
 		}
+
 		send_ctx_next = CONTAINER_OF(node_next, struct can_send_ctx, node);
 		LOG_DBG("Check node with id: %d,data: %d", send_ctx_next->frame->id, send_ctx_next->frame->data[0]);
 		if (can_frame_prio_higher(frame, send_ctx_next->frame)) {
@@ -331,8 +333,6 @@ void can_put_back_tx(struct can_tx_driver_ctx *ctx,
 			return;
 		}
 	}
-
-
 }
 
 int can_queue_tx(struct can_tx_driver_ctx *ctx, struct can_send_ctx *send_ctx)
@@ -360,29 +360,89 @@ int can_queue_tx(struct can_tx_driver_ctx *ctx, struct can_send_ctx *send_ctx)
 	return CAN_TX_OK;
 }
 
-int can_send_async(const struct device *dev, k_timeout_t frame_timeout,
+
+static inline struct can_send_ctx *get_next_send_ctx( struct can_tx_driver_ctx *ctx)
+{
+	sys_snode_t *node = sys_slist_get(&ctx->send_list);
+	if (node == NULL) {
+		return NULL;
+	}
+
+	return CONTAINER_OF(node, struct can_send_ctx, node);
+}
+
+static void refill_mailbox(struct device* dev, struct can_tx_driver_ctx *ctx, size_t mailbox_nr)
+{
+	const struct can_driver_api *api = dev->api;
+	struct can_mailbox_ctx *mailbox = &ctx->mailboxes[mailbox_nr];
+	const struct can_send_ctx *next_tx_ctx;
+
+	next_tx_ctx = get_next_send_ctx(ctx);
+	if (next_tx_ctx != NULL) {
+		mailbox->send_ctx = next_tx_ctx;
+		api->transfer(dev, next_tx_ctx->frame, mailbox_nr);
+	} else {
+		mailbox->send_ctx = NULL;
+	}
+}
+
+void can_common_mailbox_empty(struct device* dev, struct can_tx_driver_ctx *ctx, size_t mailbox_nr, int reason)
+{
+	const struct can_send_ctx *tx_ctx = ctx->mailboxes[mailbox_nr].send_ctx;
+
+	refill_mailbox(dev, ctx, mailbox_nr);
+
+	if (reason == CAN_TX_ABORT && can_check_timeout(tx_ctx)) {
+		reason = CAN_TX_TIMEOUT;
+	}
+
+	if (reason != CAN_TX_ABORT) {
+		if (tx_ctx->cb) {
+			tx_ctx->cb(dev, tx_ctx->user_data, reason);
+		}
+	} else {
+		can_put_back_tx(ctx, tx_ctx);
+	}
+}
+
+static ssize_t can_common_get_free_mailbox(struct can_tx_driver_ctx *ctx)
+{
+	const struct can_mailbox_ctx *mailboxes = ctx->mailboxes;
+
+	for (size_t i = 0; i < ctx->mailboxes_len; ++i) {
+		if (mailboxes[i].send_ctx == NULL) {
+			return i;
+		}
+	}
+
+	return CAN_TX_BUSY;
+}
+
+int can_common_send_async(struct can_tx_driver_ctx *ctx, k_timeout_t frame_timeout,
 			  struct can_send_ctx *send_ctx)
 {
-	const struct can_driver_api *api =
-		(const struct can_driver_api *)dev->api;
-	struct can_tx_driver_ctx *ctx = (struct can_tx_driver_ctx *) dev->data;
-	int ret;
+	ssize_t mbox;
 
 	if (!send_ctx->frame) {
 		LOG_ERR("Invalid send_ctx");
 		return CAN_TX_EINVAL;
 	}
 
+	if (send_ctx->frame->dlc > CAN_MAX_DLC) {
+		LOG_ERR("DLC > MAX DLC");
+		return CAN_TX_EINVAL;
+	}
+
 	send_ctx->timeout.ticks = frame_timeout.ticks + k_uptime_ticks();
 	send_ctx->node.next = NULL;
 
-	ret = api->send(dev, send_ctx);
-	if (ret == CAN_TX_BUSY) {
-		LOG_DBG("Controlle busy. Queue message");
-		ret = can_queue_tx(ctx, send_ctx);
+	mbox = can_common_get_free_mailbox(ctx);
+	if (mbox == CAN_TX_BUSY) {
+		LOG_DBG("All mb busy. Queue message");
+		return can_queue_tx(ctx, send_ctx);
 	}
 
-	return ret;
+	return mbox;
 }
 
 struct can_cb_data {

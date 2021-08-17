@@ -24,6 +24,7 @@
 #include <device.h>
 #include <string.h>
 #include <sys/util.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -355,8 +356,9 @@ typedef int (*can_set_timing_t)(const struct device *dev,
 
 typedef int (*can_set_mode_t)(const struct device *dev, enum can_mode mode);
 
-typedef int (*can_try_send_t)(const struct device *dev, struct can_send_ctx *ctx);
-
+typedef int (*can_send_t)(const struct device *dev, struct can_send_ctx *ctx, k_timeout_t frame_timeout);
+typedef int (*can_transfer_t)(const struct device *dev, const struct zcan_frame *frame, ssize_t mailbox);
+typedef int (*can_abort_t)(const struct device *dev, ssize_t mailbox);
 
 typedef int (*can_attach_msgq_t)(const struct device *dev,
 				 struct k_msgq *msg_q,
@@ -404,7 +406,9 @@ struct zcan_work {
 __subsystem struct can_driver_api {
 	can_set_mode_t set_mode;
 	can_set_timing_t set_timing;
-	can_try_send_t send;
+	can_send_t send;
+	can_transfer_t transfer;
+	can_abort_t abort;
 	can_attach_isr_t attach_isr;
 	can_detach_t detach;
 #ifndef CONFIG_CAN_AUTO_BUS_OFF_RECOVERY
@@ -517,8 +521,14 @@ void can_send_ctx_init(struct can_send_ctx *ctx,
  * @retval 0 If successful.
  * @retval CAN_TX_* on failure.
  */
-int can_send_async(const struct device *dev, k_timeout_t frame_timeout,
-		   struct can_send_ctx *ctx);
+static inline int can_send_async(const struct device *dev, k_timeout_t frame_timeout,
+		   struct can_send_ctx *ctx)
+{
+		const struct can_driver_api *api =
+		(const struct can_driver_api *)dev->api;
+
+	return api->send(dev, ctx, frame_timeout);
+}
 
 /*
  * Derived can APIs -- all implemented in terms of can_send()
